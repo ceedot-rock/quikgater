@@ -1,0 +1,72 @@
+import type { Env } from "./env";
+
+// Spec §2, check 3: "same requester >100 req/min to same domain = 429".
+const DOMAIN_WINDOW_SECONDS = 60;
+const DOMAIN_LIMIT = 100;
+
+// Payment verification hits the real x402 facilitator over the network -
+// a meaningfully more expensive and more abusable call than an in-Worker
+// check (unbounded calls could exhaust facilitator rate limits or, once
+// a paid mainnet facilitator is in the picture, cost real money). Unlike
+// the per-domain limiter above, this must be keyed on the requester ONLY:
+// it runs before the target domain has cleared the blocklist, and a
+// requester who rotates target domains per request would otherwise dodge
+// the domain-scoped limit entirely while still hammering the facilitator
+// on every single request.
+//
+// Every request needs its own payment verification (no session/caching
+// of a verified payment), so a legitimate client running near the
+// domain limiter's 100 req/min ceiling - or spread across several
+// domains - needs real headroom above 100 here. This is a backstop
+// against pathological abuse (thousands of garbage-payload requests to
+// force facilitator calls), not a throttle on normal multi-domain usage.
+const VERIFY_WINDOW_SECONDS = 60;
+const VERIFY_LIMIT = 300;
+
+/**
+ * Approximate fixed-window rate limiter backed by KV.
+ *
+ * KV is eventually consistent and this does a read-then-write (not an
+ * atomic increment), so concurrent requests in the same window can
+ * under-count. That's an accepted tradeoff for Step 1 - this is an abuse
+ * backstop, not a billing-accurate counter (billing/cost tracking is
+ * Step 5, via Tinybird). If exact counts matter, replace with a Durable
+ * Object per bucket key.
+ */
+async function incrementWindowCounter(
+  kv: KVNamespace,
+  key: string,
+  windowSeconds: number,
+): Promise<number> {
+  const current = await kv.get(key);
+  const count = current ? parseInt(current, 10) + 1 : 1;
+
+  await kv.put(key, String(count), {
+    expirationTtl: windowSeconds * 2, // outlive the window so late reads still see it
+  });
+
+  return count;
+}
+
+/** Per (requester, domain) fetch-pipeline limiter - spec §2 check 3. */
+export async function checkRateLimit(
+  env: Env,
+  requesterId: string,
+  domain: string,
+): Promise<{ limited: boolean; count: number }> {
+  const windowBucket = Math.floor(Date.now() / 1000 / DOMAIN_WINDOW_SECONDS);
+  const key = `rl:${requesterId}:${domain}:${windowBucket}`;
+  const count = await incrementWindowCounter(env.RATELIMIT_KV, key, DOMAIN_WINDOW_SECONDS);
+  return { limited: count > DOMAIN_LIMIT, count };
+}
+
+/** Per-requester limiter guarding the outbound facilitator /verify call. */
+export async function checkPaymentVerifyRateLimit(
+  env: Env,
+  requesterId: string,
+): Promise<{ limited: boolean; count: number }> {
+  const windowBucket = Math.floor(Date.now() / 1000 / VERIFY_WINDOW_SECONDS);
+  const key = `rl-verify:${requesterId}:${windowBucket}`;
+  const count = await incrementWindowCounter(env.RATELIMIT_KV, key, VERIFY_WINDOW_SECONDS);
+  return { limited: count > VERIFY_LIMIT, count };
+}

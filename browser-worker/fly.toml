@@ -1,0 +1,36 @@
+# Deployed 2026-07-23: https://fetchgate-browser-worker.fly.dev
+# App name matches the URL fetchgate-worker's Step 4 queue consumer calls
+# (spec §3) - confirmed live 2026-07-24 via a real signed x402 payment.
+#
+# Step 6 (src/providers/*.ts) needs these as real secrets, NOT plaintext
+# vars in this file - set via `fly secrets set NAME=value`, never here:
+#   BROWSERBASE_API_KEY  - https://api.browserbase.com/v1/fetch
+#   STEEL_API_KEY         - https://api.steel.dev/v1/scrape
+#   FIRECRAWL_API_KEY     - https://api.firecrawl.dev/v2/scrape
+# None configured yet - every /render call currently fails all 3
+# providers and 502s. All three are PAID services; setting these means
+# real API calls will cost real money the moment traffic reaches /render.
+app = "fetchgate-browser-worker"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  # 1, not 0: a cold machine caused a connection failure on the first
+  # /render call from the queue consumer, which made Cloudflare Queue
+  # retry up to max_retries=3 - 4x the outbound calls and latency for a
+  # single job. Keeping 1 machine warm removes that at the cost of a
+  # small constant Fly bill instead of scale-to-zero. See README "One
+  # real finding from this test".
+  min_machines_running = 1
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "2s"
+  grace_period = "5s"
+  method = "GET"
+  path = "/health"
