@@ -25,14 +25,28 @@
 const FETCH_TIMEOUT_MS = 5000; // short - this is supposed to be the *cheap* layer
 const MIN_CONTENT_LENGTH = 200; // below this, assume a JS-shell SPA with no server-rendered content
 
-const CHALLENGE_MARKERS = [
+// Checked against the raw HTML, not the stripped text: these are widget
+// class/element names that only ever appear inside a tag's attributes
+// (e.g. <div class="cf-turnstile">), so tag-stripping would remove them
+// from the extracted text entirely before a check against the text could
+// ever see them.
+const CHALLENGE_HTML_MARKERS = ["cf-turnstile", "g-recaptcha", "h-captcha"];
+
+// Checked against the extracted, visible text. Deliberately full phrases,
+// not bare words like "captcha" - a real article *about* Cloudflare or
+// bot-mitigation will legitimately use that word many times (caught live
+// against en.wikipedia.org/wiki/Cloudflare, which mentions CAPTCHA/
+// Turnstile as its actual subject matter - a single-word marker flagged
+// it as a "challenge page" when it's exactly the kind of real content
+// Layer 1 exists to serve). Full phrases like these are what an actual
+// challenge page shows the user, not what an article discussing the
+// concept would say.
+const CHALLENGE_TEXT_MARKERS = [
   "checking your browser",
   "just a moment",
-  "cf-turnstile",
-  "captcha",
   "verify you are human",
   "enable javascript to continue",
-  "attention required",
+  "attention required! | cloudflare",
 ];
 
 export interface Layer1Result {
@@ -88,12 +102,15 @@ export async function tryLayer1Fetch(url: string, fetchImpl: typeof fetch = fetc
   }
 
   const html = await res.text();
+  const lowerHtml = html.toLowerCase();
+  if (CHALLENGE_HTML_MARKERS.some((marker) => lowerHtml.includes(marker))) return null; // bot-challenge widget present
+
   const { title, text } = stripHtml(html);
 
   if (text.length < MIN_CONTENT_LENGTH) return null; // likely a JS-shell SPA with an empty server-rendered body
 
   const lowerText = text.toLowerCase();
-  if (CHALLENGE_MARKERS.some((marker) => lowerText.includes(marker))) return null; // active bot challenge, not real content
+  if (CHALLENGE_TEXT_MARKERS.some((marker) => lowerText.includes(marker))) return null; // active bot challenge, not real content
 
   return { markdown: title ? `# ${title}\n\n${text}` : text, title: title || url };
 }

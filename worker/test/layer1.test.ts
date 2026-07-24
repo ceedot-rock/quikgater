@@ -76,6 +76,37 @@ describe("tryLayer1Fetch", () => {
     expect(result).toBeNull();
   });
 
+  it("does NOT reject a real article merely because it discusses CAPTCHAs/Turnstile as its topic", async () => {
+    // Regression test for a real false positive found live against
+    // en.wikipedia.org/wiki/Cloudflare, which legitimately mentions
+    // CAPTCHA and Turnstile many times since that's what the article is
+    // about - a bare "captcha" keyword marker flagged this as a bot
+    // challenge page. See CHALLENGE_TEXT_MARKERS' comment in layer1.ts.
+    const html = `<html><head><title>Cloudflare</title></head><body><p>Cloudflare provides CAPTCHA and Turnstile services to mitigate bot traffic. ${LONG_PARAGRAPH}</p></body></html>`;
+    const fetchImpl = fakeFetch({
+      ok: true,
+      headers: new Headers({ "content-type": "text/html" }),
+      text: async () => html,
+    });
+    const result = await tryLayer1Fetch("https://en.wikipedia.org/wiki/Cloudflare", fetchImpl);
+    expect(result).not.toBeNull();
+    expect(result?.title).toBe("Cloudflare");
+  });
+
+  it("returns null when a real Turnstile/reCAPTCHA widget is present, even though its class name never appears in the stripped text", async () => {
+    // The widget's class name only ever exists inside a tag attribute -
+    // strip tags first and it's gone, so this must be checked against
+    // the raw HTML, not the post-strip text (see layer1.ts).
+    const html = `<html><head><title>Verifying</title></head><body><div class="cf-turnstile" data-sitekey="x"></div><p>${LONG_PARAGRAPH}</p></body></html>`;
+    const fetchImpl = fakeFetch({
+      ok: true,
+      headers: new Headers({ "content-type": "text/html" }),
+      text: async () => html,
+    });
+    const result = await tryLayer1Fetch("https://example.com/verifying", fetchImpl);
+    expect(result).toBeNull();
+  });
+
   it("returns null when the fetch itself throws (network error, timeout, DNS failure)", async () => {
     const fetchImpl = (async () => {
       throw new Error("network error");
