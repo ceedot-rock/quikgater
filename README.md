@@ -67,7 +67,9 @@ Deliberately attempted only *after* payment is verified and Step 1 has passed, n
 
 ## Before Step 6's Layer 3 in particular
 
-`browser-worker/src/hardFallback.ts` (Layer 3, residential proxy + CAPTCHA/Turnstile-solving) is intentionally left throwing. The spec's §4 Layer 3 section now has an explicit scope note: this is flagged for legal review before GA, because automated challenge-solving carries different ToS risk than passive fetching even on non-paywalled content. Get that review before implementing a real provider here, not after. This is separate from Step 6 (Layer 2) above, which has no such gate.
+`browser-worker/src/hardFallback.ts` (Layer 3, residential proxy + CAPTCHA/Turnstile-solving) is intentionally left throwing. The spec's §4 Layer 3 section had an explicit scope note flagging this for legal review before GA, because automated challenge-solving carries different ToS risk than passive fetching even on non-paywalled content - see `LEGAL_REVIEW_REQUEST_LAYER3.md` for the scoped request that went out.
+
+**Legal review cleared, per user confirmation, 2026-07-24.** The user confirmed the legal side has been checked - implementation of a real Layer 3 provider is no longer blocked on this. (This repo has no independent record of the review's actual content/scope beyond that confirmation - if a provider/vendor choice needs to match specific conditions from that review, that context lives outside this codebase.) `hardFallback.ts` still throws as of this note; it hasn't been implemented yet, just unblocked.
 
 ## Running things
 
@@ -148,4 +150,6 @@ Not fired live (deliberately, per the "core scope" decision): the total-failure 
 
 ## Going to mainnet (separate decision, not a config flip)
 
-Switching `network` from `base-sepolia` to `base` and pointing at a real facilitator (CDP-hosted, needs an API key) means real USDC moves. Do this deliberately, after Layer 3's legal review (see above) and after Steps 4-6 exist so payments are actually settled against real delivered content — not before.
+Switching `network` from `base-sepolia` to `base` and pointing at a real facilitator (CDP-hosted, needs an API key) means real USDC moves. Do this deliberately, after Layer 3's legal review and after Steps 4-6 exist so payments are actually settled against real delivered content — not before.
+
+**Both conditions are now met** (legal review confirmed 2026-07-24, Steps 4-6 already live-verified above) - but this is still a deliberate action to take when explicitly asked for, not something to do as a side effect of other work. Also worth a fresh look before flipping it: `worker/wrangler.toml`'s comment on `PAY_TO_ADDRESS` (not on-chain verified, only format-validated) and Stripe's live-mode key (already real money-capable, unaffected by this switch either way).
