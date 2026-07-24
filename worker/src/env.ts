@@ -14,6 +14,6 @@ export interface Env {
   // Step 4: async render queue + job status storage.
   RENDER_QUEUE: Queue<RenderJob>;
   JOBS_KV: KVNamespace;
-  // fetchgate-browser-worker's base URL (Fly.io). Public, not a secret.
+  // quikgater-browser-worker's base URL (Fly.io). Public, not a secret.
   BROWSER_WORKER_URL: string;
 }

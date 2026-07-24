@@ -2,8 +2,8 @@ import type { Env } from "./env";
 
 // Identify ourselves distinctly in both the fetch UA and the robots.txt
 // group we prefer, so a site can carve out rules specifically for
-// Fetchgate instead of only ever hitting their "*" group.
-export const USER_AGENT = "fetchgate";
+// Quikgater instead of only ever hitting their "*" group.
+export const USER_AGENT = "quikgater";
 const ROBOTS_CACHE_TTL_SECONDS = 60 * 60 * 24; // 24h, per spec §2
 
 interface Rule {
@@ -90,7 +90,7 @@ export async function getRobotsTxt(
   let body = "";
   try {
     const res = await fetchImpl(`${origin}/robots.txt`, {
-      headers: { "user-agent": `${USER_AGENT}-bot (+https://fetchgate.dev/bot)` },
+      headers: { "user-agent": `${USER_AGENT}-bot (+https://quikgater.com/bot)` },
     });
     if (res.ok) body = await res.text();
     // non-2xx (404, etc.) => treat as "no robots.txt" (empty => allow-all)

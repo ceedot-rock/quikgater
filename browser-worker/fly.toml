@@ -1,16 +1,15 @@
-# Deployed 2026-07-23: https://fetchgate-browser-worker.fly.dev
-# App name matches the URL fetchgate-worker's Step 4 queue consumer calls
-# (spec §3) - confirmed live 2026-07-24 via a real signed x402 payment.
+# Renamed from fetchgate-browser-worker to quikgater-browser-worker,
+# 2026-07-24 (Fetchgate collided with an existing company; see README).
+# App name matches the URL quikgater-worker's Step 4 queue consumer calls
+# (spec §3) - originally confirmed live 2026-07-24 via a real signed x402
+# payment under the old name, then re-verified after this rename.
 #
 # Step 6 (src/providers/*.ts) needs these as real secrets, NOT plaintext
 # vars in this file - set via `fly secrets set NAME=value`, never here:
 #   BROWSERBASE_API_KEY  - https://api.browserbase.com/v1/fetch
 #   STEEL_API_KEY         - https://api.steel.dev/v1/scrape
 #   FIRECRAWL_API_KEY     - https://api.firecrawl.dev/v2/scrape
-# None configured yet - every /render call currently fails all 3
-# providers and 502s. All three are PAID services; setting these means
-# real API calls will cost real money the moment traffic reaches /render.
-app = "fetchgate-browser-worker"
+app = "quikgater-browser-worker"
 primary_region = "iad"
 
 [build]

@@ -377,7 +377,7 @@ describe("Queue consumer (queue())", () => {
       paymentRequirements: fakePaymentRequirements,
     };
     const message = fakeMessage(job);
-    const batch = { messages: [message], queue: "fetchgate-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
+    const batch = { messages: [message], queue: "quikgater-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
 
     await worker.queue(batch as unknown as MessageBatch<RenderJob>, env, createExecutionContext());
 
@@ -397,7 +397,7 @@ describe("Queue consumer (queue())", () => {
       paymentRequirements: fakePaymentRequirements,
     };
     const message = fakeMessage(job);
-    const batch = { messages: [message], queue: "fetchgate-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
+    const batch = { messages: [message], queue: "quikgater-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
 
     await worker.queue(batch as unknown as MessageBatch<RenderJob>, env, createExecutionContext());
 

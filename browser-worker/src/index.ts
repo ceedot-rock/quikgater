@@ -57,5 +57,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`fetchgate-browser-worker listening on :${PORT}`);
+  console.log(`quikgater-browser-worker listening on :${PORT}`);
 });

@@ -1,9 +1,9 @@
 {
-  "name": "fetchgate-worker",
+  "name": "quikgater-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Worker edge layer for Fetchgate - blocklist, robots.txt, rate limiting, cache, x402 gate.",
+  "description": "Cloudflare Worker edge layer for Quikgater - blocklist, robots.txt, rate limiting, cache, x402 gate.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

@@ -99,8 +99,8 @@ export function buildPaymentRequirements(opts: {
     payTo: opts.payTo,
     resource: opts.resource,
     description: opts.cacheHit
-      ? "Fetchgate cache hit"
-      : "Fetchgate render attempt (settled only if content is actually delivered)",
+      ? "Quikgater cache hit"
+      : "Quikgater render attempt (settled only if content is actually delivered)",
     mimeType: "application/json",
     outputSchema: null,
     // 180s, not the original 60s: settlement for a miss is deferred

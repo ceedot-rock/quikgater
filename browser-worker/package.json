@@ -1,9 +1,9 @@
 {
-  "name": "fetchgate-browser-worker",
+  "name": "quikgater-browser-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Fly.io render/hard-fallback service for Fetchgate (spec §4, Layers 2-3).",
+  "description": "Fly.io render/hard-fallback service for Quikgater (spec §4, Layers 2-3).",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

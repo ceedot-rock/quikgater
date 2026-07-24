@@ -1,24 +1,26 @@
-# Fetchgate
+# Quikgater
 
-Pay-per-fact web fetch for AI agents. Implementation of `fetchgate_v2_1_FINAL.md` (x402 Primitive Spec v2.1), which is the source of truth for architecture/pricing/policy decisions - this README only tracks build status.
+Pay-per-fact web fetch for AI agents. Implementation of `fetchgate_v2_1_FINAL.md` (x402 Primitive Spec v2.1, still under its original filename — the spec doc wasn't renamed, only the product/repo), which is the source of truth for architecture/pricing/policy decisions - this README only tracks build status.
+
+**Renamed from Fetchgate to Quikgater, 2026-07-24** — "Fetchgate" collided with an existing company (fetchgate.com, a Webflow file-gating product). GitHub repo, Cloudflare Worker, Queue, R2 bucket, and Fly.io app were all renamed/recreated; old resources were deleted. See the bottom of this file for the verification log from that migration.
 
 ## Layout
 
-- `worker/` — `fetchgate-worker`, the Cloudflare Worker edge layer (blocklist, robots.txt, rate limit, eventually the x402/cache/queue gate).
-- `browser-worker/` — `fetchgate-browser-worker`, the Fly.io render service (Layers 2-3: rented render failover, hard fallback).
+- `worker/` — `quikgater-worker`, the Cloudflare Worker edge layer (blocklist, robots.txt, rate limit, eventually the x402/cache/queue gate).
+- `browser-worker/` — `quikgater-browser-worker`, the Fly.io render service (Layers 2-3: rented render failover, hard fallback).
 
 ## Build order status (spec §8)
 
 | Step | What | Status |
 |---|---|---|
 | 1 | Edge Safety — blocklist KV + robots.txt check in the Worker | **Done.** `worker/src/{blocklist,robots,ratelimit}.ts` + `index.ts`. 30 tests passing (`cd worker && npm test`), incl. payment-gate tests. |
-| 2 | Delete Toxic Code — strip v1's paywall-bypass code from the Fly.io repo | **N/A.** This is a from-scratch build, not a migration of an existing v1 repo — there's nothing to delete. If you're pointing this at an already-deployed v1 `fetchgate-browser-worker` (formerly `tollbooth-browser-worker`), run the `grep -r "archive.is" .` check from the spec there before reusing that deployment. |
+| 2 | Delete Toxic Code — strip v1's paywall-bypass code from the Fly.io repo | **N/A.** This is a from-scratch build, not a migration of an existing v1 repo — there's nothing to delete. If you're pointing this at an already-deployed v1 `quikgater-browser-worker` (formerly `tollbooth-browser-worker`), run the `grep -r "archive.is" .` check from the spec there before reusing that deployment. |
 | 3 | Split Routes — `POST /render` (failover) + `POST /hard-fallback`, proxy logic only in the second route | **Done** (routing + orchestration shape). `browser-worker/src/index.ts` dispatches both routes; `render.ts` has the failover-orchestrator structure from the spec's pseudocode. Both routes currently fail because the providers they call are Step 6 stubs — that's expected until Step 6. |
-| 4 | Async Queue — Worker pushes to Cloudflare Queue instead of calling Fly.io synchronously | **Done.** Real Cloudflare Queue (`fetchgate-render-queue`), producer + consumer both wired in `worker/src/{queue,index}.ts`. Worker returns `202` + `jobId` instead of calling Fly.io synchronously; consumer calls `/render` then `/hard-fallback` on failure; `GET /v1/job/{id}` polls status. See caveat below. |
+| 4 | Async Queue — Worker pushes to Cloudflare Queue instead of calling Fly.io synchronously | **Done.** Real Cloudflare Queue (`quikgater-render-queue`), producer + consumer both wired in `worker/src/{queue,index}.ts`. Worker returns `202` + `jobId` instead of calling Fly.io synchronously; consumer calls `/render` then `/hard-fallback` on failure; `GET /v1/job/{id}` polls status. See caveat below. |
 | 5 | Cache + Cost Tracking — KV/R2 dedup cache (Layer 0) + Tinybird logging | **Done.** Real KV (metadata) + R2 (body) cache in `worker/src/cache.ts`, wired into `index.ts` (hit short-circuits before the queue) and `queue.ts` (successful renders populate it). Cost tracking is real structured logging matching spec §6's exact schema (`worker/src/costlog.ts`) - not real Tinybird yet, no token available. See caveats below. |
 | 6 | Multi-Provider Failover — Browserbase primary, Steel.dev + Firecrawl fallbacks | **Done, live-verified with real content delivered.** Real HTTP clients in `browser-worker/src/providers/{browserbase,steeldev,firecrawl}.ts` against each provider's actual current API (endpoints/auth/schemas pulled from their live docs and SDK source, not memory). `render.ts` enforces the spec's 15s total timeout across the failover chain via a shared `AbortController`. Real (paid) API keys for all three are set as Fly secrets. 16/16 tests passing. See "Live" below for the full end-to-end proof. |
 
-**Payment gate (not one of the spec's numbered steps, but now built):** `worker/src/payment.ts`, wired into `index.ts` ahead of the Step 1 blocklist check, matching spec §3's architecture diagram order. x402 protocol, scheme `exact`, network `base-sepolia` (testnet — see "Going to mainnet" below), verified live against the real `x402.org/facilitator` (schema pulled directly from `github.com/coinbase/x402/specs`, not from memory). Do not reuse `/home/cee/projects/x402-client` — that's an unrelated Solana payer client, and Fetchgate is the payment *verifier*, not a payer.
+**Payment gate (not one of the spec's numbered steps, but now built):** `worker/src/payment.ts`, wired into `index.ts` ahead of the Step 1 blocklist check, matching spec §3's architecture diagram order. x402 protocol, scheme `exact`, network `base-sepolia` (testnet — see "Going to mainnet" below), verified live against the real `x402.org/facilitator` (schema pulled directly from `github.com/coinbase/x402/specs`, not from memory). Do not reuse `/home/cee/projects/x402-client` — that's an unrelated Solana payer client, and Quikgater is the payment *verifier*, not a payer.
 
 **Payment-verify rate limit:** `checkPaymentVerifyRateLimit` in `worker/src/ratelimit.ts`, 300 req/min per requester, checked immediately before the facilitator `/verify` call (not after — the point is to bound that outbound network call itself, not just the HTTP response). Deliberately keyed on requester only, not requester+domain like the Step 1 domain limiter — otherwise rotating target domains would dodge it entirely while still hammering the facilitator. 300 (not something tighter) because every request needs its own verification with no session caching, so a legitimate client near the domain limiter's 100/min ceiling - or spread across a few domains - needs real headroom above 100.
 
@@ -65,19 +67,19 @@ cd browser-worker && npm run dev                   # server on :8080, 502s witho
 
 ## Live
 
-**`fetchgate-worker` is deployed and serving traffic: https://fetchgate-worker.ceedotrock.workers.dev**
+**`quikgater-worker` is deployed and serving traffic: https://quikgater-worker.ceedotrock.workers.dev**
 
 Smoke-tested against the real URL after deploy (not just `wrangler dev`): no-payment → real 402 with `payTo` correctly showing the production address, malformed `X-PAYMENT` → 400, missing `url` param → 400. Cloudflare account: `63705eb783d1e108f0d599661c56b05e` (workers.dev subdomain `ceedotrock` was auto-registered via the API as part of this deploy — accounts don't have one by default). All 4 KV namespaces are real, `wrangler.toml` has zero `REPLACE_WITH_REAL_KV_ID` placeholders left.
 
 Reminder of what "live" meant *at this point in the build*: the payment gate verified real x402 payment authorizations against the real Base Sepolia facilitator, but never settled them - no USDC moved yet, by design, until there was a real resource behind Steps 4-6 to charge for. That's no longer true as of the settlement work below - see "Real settlement fired on-chain" for what changed.
 
-**`fetchgate-browser-worker` is also deployed: https://fetchgate-browser-worker.fly.dev** (Fly.io, app `fetchgate-browser-worker`, org "personal", region `iad`, single machine, `min_machines_running = 1`). Originally smoke-tested with `/render` correctly 502ing (Step 6 was stubbed then); see below for the real-provider re-test once Step 6 landed. `POST /hard-fallback` still correctly 502s `HARD_FALLBACK_FAILED` (blocked on the Layer 3 legal review above, unaffected by Step 6), missing-`url` → 400, unknown route → 404.
+**`quikgater-browser-worker` is also deployed: https://quikgater-browser-worker.fly.dev** (Fly.io, app `quikgater-browser-worker`, org "personal", region `iad`, single machine, `min_machines_running = 1`). Originally smoke-tested with `/render` correctly 502ing (Step 6 was stubbed then); see below for the real-provider re-test once Step 6 landed. `POST /hard-fallback` still correctly 502s `HARD_FALLBACK_FAILED` (blocked on the Layer 3 legal review above, unaffected by Step 6), missing-`url` → 400, unknown route → 404.
 
 **Full pipeline fired for real, end to end, 2026-07-24.** A throwaway EVM keypair (`0x0c095a7C3716aebeC895d36B2DDd1D0c610c8588`, logged in `.env_secrets` as `X402_TEST_WALLET_*`, testnet-only, zero real value) was funded with 20 USDC on Base Sepolia via the CAPTCHA-gated public faucet, then used to sign a real EIP-712 `TransferWithAuthorization` and fire it at the live Worker with a real `X-PAYMENT` header. Confirmed:
 
 1. The real `x402.org/facilitator` verified the signature and returned the correct payer address.
-2. `fetchgate-worker` returned `202` with a real `jobId` and enqueued onto the real `fetchgate-render-queue`.
-3. The queue consumer picked it up and called `fetchgate-browser-worker`'s `/render` - confirmed independently via `fly logs`, which show `browserbase`/`steeldev`/`firecrawl` all failing with `NOT_IMPLEMENTED` (Step 6 stubs) at the moment the payment was fired.
+2. `quikgater-worker` returned `202` with a real `jobId` and enqueued onto the real `quikgater-render-queue`.
+3. The queue consumer picked it up and called `quikgater-browser-worker`'s `/render` - confirmed independently via `fly logs`, which show `browserbase`/`steeldev`/`firecrawl` all failing with `NOT_IMPLEMENTED` (Step 6 stubs) at the moment the payment was fired.
 4. `GET /v1/job/{id}` correctly resolved to `{"status":"failed","error":"RENDER_FAILED"}`.
 5. No settlement occurred (confirmed via the `payment.settled: false` in the response) - consistent with the design, not a gap.
 
@@ -94,7 +96,7 @@ The cache-miss path was already proven live by the Step 4 test itself (nothing w
 1. **Direct `/render` test** (no payment, no queue - just the provider integration): `POST /render {"url":"https://example.com"}` → real 200 with real markdown, `providerUsed: "browserbase"` (primary succeeded, no failover needed).
 2. **Full pipeline via a real signed x402 payment** (reusing the same funded testnet wallet from Steps 4/5, for a fresh uncached URL): payment verified → `202` + `jobId` → queue consumer called `browser-worker` → Browserbase succeeded → `GET /v1/job/{id}` resolved to `"status":"done"` with the real markdown, `providerUsed: "browserbase"`. Then fired a **second** real payment for the *same* URL: `200` immediately, `cacheHit: true`, `tierUsed: "L2-browserbase"` - proving Steps 4, 5, and 6 all work together for real, not just individually.
 
-Both calls' `costActual` came back `null` from the real API, confirming the "no per-call cost data" caveat above against reality, not just documentation. No settlement occurred either time (`payment.settled: false`) - Fetchgate can now deliver real paid-provider content without charging for it, which is still the deliberate boundary described above, just a sharper version of it now that there's something real behind it.
+Both calls' `costActual` came back `null` from the real API, confirming the "no per-call cost data" caveat above against reality, not just documentation. No settlement occurred either time (`payment.settled: false`) - Quikgater can now deliver real paid-provider content without charging for it, which is still the deliberate boundary described above, just a sharper version of it now that there's something real behind it.
 
 **Real settlement fired on-chain, 2026-07-24 - the first time actual money has moved anywhere in this build.** Reused the same funded testnet wallet (still had ~20 USDC left). Two settlements, both verified three ways: the job/response JSON, the wallet's on-chain balance before/after, and the transaction itself on a public block explorer.
 
@@ -106,6 +108,16 @@ Nothing was charged for nothing: the earlier Step 4 test (before settlement exis
 **`PAY_TO_ADDRESS` changed and re-verified live, 2026-07-24.** Updated in `worker/wrangler.toml` from `0x8542B90d11a5c21722a4A3B1047098a82203e288` to `0x64E31E05583F250644b76d0FFe12e129ea4DeeCe`. All 75 tests still passed after the change; redeployed, then smoke-tested the live `402` response until `payTo` reflected the new address (took a few seconds - Worker deploys aren't instant-everywhere).
 
 Then fired a real end-to-end payment against the new address, reusing the same funded testnet wallet: signed a $0.08 (80000 atomic units) `TransferWithAuthorization` for a fresh, guaranteed-uncached URL. `202` → queued → `browserbase` rendered it for real → `GET /v1/job/{id}` resolved to `"status":"done"`, `"settled":true`, with a real transaction hash. Independently confirmed on Base Sepolia Blockscout (not just the job JSON): the transaction's token-transfer log shows exactly `80000` units (6 decimals = $0.08) moving from the test wallet (`0x0c095a7C...c8588`) to `0x64E31E05583F250644b76d0FFe12e129ea4DeeCe` - the new address is correctly live and receiving settled payments.
+
+**Renamed Fetchgate → Quikgater, 2026-07-24, verified live end-to-end after the rename.** "Fetchgate" turned out to already be a live commercial product (fetchgate.com, unrelated Webflow file-gating tool) - caught after the GitHub repo, Worker, and Fly app were already built under that name. What changed:
+- GitHub repo `ceedot-rock/fetchgate` → `ceedot-rock/quikgater` (`gh repo rename`, remote auto-updated).
+- Cloudflare Worker: new script `quikgater-worker` deployed (Worker names can't be renamed in place); old `fetchgate-worker` deleted after cutover.
+- Cloudflare Queue: new `quikgater-render-queue` created (the old one's consumer/producer bindings had to be detached from the old Worker first, then the old queue deleted).
+- R2 bucket: new `quikgater-cache` created and wired in; old `fetchgate-cache` left orphaned (had cached test objects, non-empty-bucket delete not worth forcing - it's disposable cache data, not user data).
+- Fly.io: new app `quikgater-browser-worker` created, same three provider secrets (Browserbase/Steel/Firecrawl) copied over from `.env_secrets`, deployed; old `fetchgate-browser-worker` app destroyed.
+- Code: `USER_AGENT` in `worker/src/robots.ts` (sent as a real header on every robots.txt fetch to third-party sites) changed from `fetchgate` to `quikgater`, plus all `Fetchgate`-branded strings in `payment.ts`'s x402 descriptions, both `package.json`s, and this README.
+
+Re-verified after cutover, against the new hostnames, not just assumed working: `POST https://quikgater-browser-worker.fly.dev/render` returned real rendered markdown (`providerUsed: "browserbase"`), and `GET https://quikgater-worker.ceedotrock.workers.dev/?url=...` returned the correct live `402` with `payTo` still showing the current address. All 75 worker tests still pass post-rename.
 
 ## Going to mainnet (separate decision, not a config flip)
 

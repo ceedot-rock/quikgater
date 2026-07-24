@@ -1,4 +1,4 @@
-name = "fetchgate-worker"
+name = "quikgater-worker"
 main = "src/index.ts"
 compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
@@ -36,10 +36,10 @@ preview_id = "c040c6a15eb54e699f79cfc27516febc"
 # consumer Worker needed for this volume.
 [[queues.producers]]
 binding = "RENDER_QUEUE"
-queue = "fetchgate-render-queue"
+queue = "quikgater-render-queue"
 
 [[queues.consumers]]
-queue = "fetchgate-render-queue"
+queue = "quikgater-render-queue"
 max_batch_size = 10
 max_retries = 3
 
@@ -57,7 +57,7 @@ preview_id = "1406ec9760144a4c98958dc3dea6fd63"
 # actually exists.
 [[r2_buckets]]
 binding = "CACHE_R2"
-bucket_name = "fetchgate-cache"
+bucket_name = "quikgater-cache"
 
 [vars]
 # Base Sepolia address that receives x402 USDC test payments. Updated
@@ -68,5 +68,6 @@ bucket_name = "fetchgate-cache"
 # would fail at settlement time once settlePayment is ever wired in.
 PAY_TO_ADDRESS = "0x64E31E05583F250644b76d0FFe12e129ea4DeeCe"
 
-# fetchgate-browser-worker's live Fly.io URL. Deployed 2026-07-23.
-BROWSER_WORKER_URL = "https://fetchgate-browser-worker.fly.dev"
+# quikgater-browser-worker's live Fly.io URL. Deployed 2026-07-23,
+# app renamed (new Fly app + redeploy) 2026-07-24.
+BROWSER_WORKER_URL = "https://quikgater-browser-worker.fly.dev"

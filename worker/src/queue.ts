@@ -143,7 +143,7 @@ async function settleAndWriteDone(
 
 /**
  * Consumer-side logic: POST /render, and on failure POST /hard-fallback,
- * against fetchgate-browser-worker. Matches the failover-orchestrator
+ * against quikgater-browser-worker. Matches the failover-orchestrator
  * shape from spec §3's diagram ("if fail -> POST /hard-fallback").
  *
  * Settlement only happens here, and only on success - see payment.ts and

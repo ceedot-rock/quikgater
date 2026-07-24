@@ -27,15 +27,15 @@ describe("robotsAllows", () => {
     expect(robotsAllows(txt, "/x")).toBe(true);
   });
 
-  it("falls back to the * group when there's no fetchgate-specific group", () => {
+  it("falls back to the * group when there's no quikgater-specific group", () => {
     const txt = "User-agent: Googlebot\nDisallow: /\nUser-agent: *\nDisallow: /only-this";
     expect(robotsAllows(txt, "/anything-else")).toBe(true);
     expect(robotsAllows(txt, "/only-this/page")).toBe(false);
   });
 
-  it("prefers a fetchgate-specific group over *", () => {
-    const txt = "User-agent: fetchgate\nDisallow: /no-bots-of-any-kind\nUser-agent: *\nDisallow: /";
-    // The "*" group blocks everything, but a fetchgate-specific group
+  it("prefers a quikgater-specific group over *", () => {
+    const txt = "User-agent: quikgater\nDisallow: /no-bots-of-any-kind\nUser-agent: *\nDisallow: /";
+    // The "*" group blocks everything, but a quikgater-specific group
     // exists and only blocks one path - it should win entirely.
     expect(robotsAllows(txt, "/anything")).toBe(true);
     expect(robotsAllows(txt, "/no-bots-of-any-kind/x")).toBe(false);
