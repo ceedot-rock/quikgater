@@ -22,8 +22,13 @@ import { enqueueRenderJob, getJobStatus, processRenderJob } from "../src/queue";
 import { getCached } from "../src/cache";
 import { settlePayment } from "../src/payment";
 import type { PaymentPayload, PaymentRequirements } from "../src/payment";
+// credits.ts is real KV read/writes here, not mocked - unlike
+// settlePayment, it has no real network call to avoid, so there's no
+// reason to fake it; Miniflare simulates CREDITS_KV locally same as any
+// other KV binding.
+import { createAccount, getAccount } from "../src/credits";
 import type { Env } from "../src/env";
-import type { RenderJob } from "../src/queue";
+import type { RenderJob, Billing } from "../src/queue";
 
 // Real queue.ts logic, unmocked - worker.test.ts mocks this module so
 // index.ts's own tests don't touch Miniflare's real (async, background)
@@ -77,18 +82,19 @@ beforeEach(() => {
   });
 });
 
+const x402Billing: Billing = { kind: "x402", paymentPayload: fakePaymentPayload, paymentRequirements: fakePaymentRequirements };
+
 describe("enqueueRenderJob", () => {
   it("writes a pending status to JOBS_KV before sending to the queue", async () => {
     const e = testEnv();
-    const { jobId } = await enqueueRenderJob(e, "https://example.com/docs", fakePaymentPayload, fakePaymentRequirements);
+    const { jobId } = await enqueueRenderJob(e, "https://example.com/docs", x402Billing);
 
     expect(e.RENDER_QUEUE.send).toHaveBeenCalledTimes(1);
     const sentJob = vi.mocked(e.RENDER_QUEUE.send).mock.calls[0]?.[0] as RenderJob;
     expect(sentJob.jobId).toBe(jobId);
     expect(sentJob.url).toBe("https://example.com/docs");
     expect(sentJob.attempt).toBe(1);
-    expect(sentJob.paymentPayload).toBe(fakePaymentPayload);
-    expect(sentJob.paymentRequirements).toBe(fakePaymentRequirements);
+    expect(sentJob.billing).toEqual(x402Billing);
 
     const status = await getJobStatus(e, jobId);
     expect(status).toEqual({ status: "pending" });
@@ -96,9 +102,17 @@ describe("enqueueRenderJob", () => {
 
   it("generates a unique job id per call", async () => {
     const e = testEnv();
-    const a = await enqueueRenderJob(e, "https://example.com/a", fakePaymentPayload, fakePaymentRequirements);
-    const b = await enqueueRenderJob(e, "https://example.com/b", fakePaymentPayload, fakePaymentRequirements);
+    const a = await enqueueRenderJob(e, "https://example.com/a", x402Billing);
+    const b = await enqueueRenderJob(e, "https://example.com/b", x402Billing);
     expect(a.jobId).not.toBe(b.jobId);
+  });
+
+  it("also accepts credits (Rail B) billing", async () => {
+    const e = testEnv();
+    const { jobId } = await enqueueRenderJob(e, "https://example.com/credits-job", { kind: "credits", apiKey: "qg_test" });
+    const sentJob = vi.mocked(e.RENDER_QUEUE.send).mock.calls[0]?.[0] as RenderJob;
+    expect(sentJob.jobId).toBe(jobId);
+    expect(sentJob.billing).toEqual({ kind: "credits", apiKey: "qg_test" });
   });
 });
 
@@ -110,14 +124,13 @@ describe("getJobStatus", () => {
 });
 
 describe("processRenderJob", () => {
-  function job(id: string, url: string): RenderJob {
+  function job(id: string, url: string, billing: Billing = x402Billing): RenderJob {
     return {
       jobId: id,
       url,
       attempt: 1,
       requestedAt: Date.now(),
-      paymentPayload: fakePaymentPayload,
-      paymentRequirements: fakePaymentRequirements,
+      billing,
     };
   }
 
@@ -216,5 +229,55 @@ describe("processRenderJob", () => {
     // failure is a billing problem, not a reason to throw away the work.
     const cached = await getCached(e, j.url);
     expect(cached).not.toBeNull();
+  });
+
+  describe("Rail B (credits) billing", () => {
+    it("debits the real tier price (not a pre-quoted worst case) once the render succeeds", async () => {
+      const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
+      await createAccount(e, "qg_credits_render_ok");
+      // Give it more than $0.08 so the debit can actually succeed.
+      await e.CREDITS_KV.put("account:qg_credits_render_ok", JSON.stringify({ apiKey: "qg_credits_render_ok", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+
+      const j = job("process-credits-render-ok", "https://credits-render.example/docs", { kind: "credits", apiKey: "qg_credits_render_ok" });
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ markdown: "# Hi", providerUsed: "browserbase" }), { status: 200 }));
+
+      await processRenderJob(e, j, fetchImpl as unknown as typeof fetch);
+
+      const status = await getJobStatus(e, j.jobId);
+      expect(status).toMatchObject({ status: "done", settled: true });
+      const account = await getAccount(e, "qg_credits_render_ok");
+      // 1,000,000 - 80,000 (MISS_PRICE_ATOMIC, the L2 tier price) = 920,000
+      expect(account?.balanceAtomic).toBe(920_000);
+    });
+
+    it("charges the $0.0001 failure price on total failure - something Rail A structurally can't do", async () => {
+      const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
+      await e.CREDITS_KV.put("account:qg_credits_fail", JSON.stringify({ apiKey: "qg_credits_fail", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+
+      const j = job("process-credits-fail", "https://credits-fail.example/docs", { kind: "credits", apiKey: "qg_credits_fail" });
+      const fetchImpl = vi.fn(async () => new Response("down", { status: 502 }));
+
+      await processRenderJob(e, j, fetchImpl as unknown as typeof fetch);
+
+      const status = await getJobStatus(e, j.jobId);
+      expect(status).toMatchObject({ status: "failed", error: "RENDER_FAILED" });
+      const account = await getAccount(e, "qg_credits_fail");
+      // 1,000,000 - 100 (FAILURE_PRICE_ATOMIC) = 999,900
+      expect(account?.balanceAtomic).toBe(999_900);
+    });
+
+    it("marks the job unsettled (but still returns content) when the debit fails despite a successful render", async () => {
+      const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
+      // Balance too low to cover the $0.08 render tier once it's actually charged.
+      await e.CREDITS_KV.put("account:qg_credits_broke", JSON.stringify({ apiKey: "qg_credits_broke", balanceAtomic: 100, createdAt: Date.now() }));
+
+      const j = job("process-credits-broke", "https://credits-broke.example/docs", { kind: "credits", apiKey: "qg_credits_broke" });
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ markdown: "# Ok", providerUsed: "browserbase" }), { status: 200 }));
+
+      await processRenderJob(e, j, fetchImpl as unknown as typeof fetch);
+
+      const status = await getJobStatus(e, j.jobId);
+      expect(status).toMatchObject({ status: "done", markdown: "# Ok", settled: false, settlementError: "INSUFFICIENT_CREDITS" });
+    });
   });
 });

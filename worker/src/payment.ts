@@ -62,9 +62,8 @@ interface SettleResponse {
 // Prices the client must know and sign for *before* we do any work -
 // EIP-3009's transferWithAuthorization signs an exact `value`, so
 // whatever we quote here is the only amount we can ever settle for this
-// request. There is no "charge less/more after the fact" without a
-// second signature from the client (that's what Rail B / deposit
-// credits would be for - not built).
+// Rail A (x402) request. There is no "charge less/more after the fact"
+// without a second signature from the client.
 //
 // CACHE_HIT: $0.0002, matches spec §5's cache tier - known immediately,
 // settled synchronously in index.ts.
@@ -79,6 +78,27 @@ interface SettleResponse {
 // outcome - Layer 1 or Layer 2 - is profitable, not just render attempts.
 export const CACHE_HIT_PRICE_ATOMIC = "200"; // $0.0002
 export const MISS_PRICE_ATOMIC = "80000"; // $0.08
+
+// Rail B (deposit credits, credits.ts) has no equivalent exact-signature
+// constraint - a debit is just an internal KV write, decided *after* the
+// real outcome is known, not pre-quoted and signed. That's what finally
+// makes real per-tier pricing possible: a Bearer-billed request that
+// Layer 1 ends up serving is debited the real $0.002 "standard fetch"
+// rate instead of Rail A's worst-case $0.08 (see queue.ts's
+// priceAtomicForTier and index.ts's Bearer billing path). Only used by
+// credits.ts/queue.ts - Rail A still can never use these for the reason
+// above.
+export const STANDARD_FETCH_PRICE_ATOMIC = "2000"; // $0.002 - Layer 1 success, credits only
+export const HARD_FALLBACK_PRICE_ATOMIC = "10000"; // $0.10 - Layer 3, credits only (L3 itself is still legally gated/stubbed)
+export const FAILURE_PRICE_ATOMIC = "100"; // $0.0001 - total failure, credits only; Rail A stays $0 on failure (can't charge without a fresh signature)
+
+/** Maps a cost-log layer to the atomic price a credits-billed job should be debited, now that the real outcome is known. Rail A can't use this - see the constants' comments above. */
+export function priceAtomicForTier(layer: "L0" | "L1" | "L2" | "L2-browserbase" | "L2-steel" | "L2-firecrawl" | "L3"): string {
+  if (layer === "L0") return CACHE_HIT_PRICE_ATOMIC;
+  if (layer === "L1") return STANDARD_FETCH_PRICE_ATOMIC;
+  if (layer === "L3") return HARD_FALLBACK_PRICE_ATOMIC;
+  return MISS_PRICE_ATOMIC; // L2 and its provider-specific variants
+}
 
 /**
  * Builds the PaymentRequirements for a request, priced by whether it's

@@ -16,4 +16,12 @@ export interface Env {
   JOBS_KV: KVNamespace;
   // quikgater-browser-worker's base URL (Fly.io). Public, not a secret.
   BROWSER_WORKER_URL: string;
+  // Rail B (deposit credits): API-key -> balance ledger (src/credits.ts).
+  CREDITS_KV: KVNamespace;
+  // Stripe restricted key + webhook signing secret (src/stripe.ts). Real
+  // secrets, set via `wrangler secret put` - never in wrangler.toml vars.
+  // Live-mode account shared with other unrelated projects (wsoap,
+  // agentrider, agentmagnet) - do not assume exclusive use of it.
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
 }

@@ -55,12 +55,28 @@ vi.mock("../src/layer1", async (importOriginal) => {
   };
 });
 
+// Only the real outbound Stripe API call is mocked - verifyWebhookSignature
+// and parseCheckoutCompletedEvent are pure logic (own coverage in
+// stripe.test.ts) and stay real here so the webhook route's tests exercise
+// real signature verification against env.STRIPE_WEBHOOK_SECRET (from
+// worker/.dev.vars locally), not a stubbed "always true".
+vi.mock("../src/stripe", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/stripe")>();
+  return {
+    ...actual,
+    createDepositCheckoutSession: vi.fn(async () => ({ id: "cs_mock_123", url: "https://checkout.stripe.com/cs_mock_123" })),
+  };
+});
+
 import { settlePayment, verifyPayment } from "../src/payment";
 import type { PaymentPayload, PaymentRequirements } from "../src/payment";
 import { enqueueRenderJob, getJobStatus, processRenderJob } from "../src/queue";
 import type { RenderJob } from "../src/queue";
 import { setCached } from "../src/cache";
 import { tryLayer1Fetch } from "../src/layer1";
+import { createDepositCheckoutSession } from "../src/stripe";
+import { createAccount, getAccount } from "../src/credits";
+import type { Env } from "../src/env";
 
 const fakePaymentPayload: PaymentPayload = {
   x402Version: 1,
@@ -197,8 +213,7 @@ describe("Payment gate (x402)", () => {
     expect(enqueueRenderJob).toHaveBeenCalledWith(
       expect.anything(),
       "https://payment-ok.example/",
-      expect.anything(),
-      expect.anything(),
+      expect.objectContaining({ kind: "x402" }),
     );
   });
 
@@ -390,8 +405,7 @@ describe("Queue consumer (queue())", () => {
       url: "https://example.com",
       attempt: 1,
       requestedAt: Date.now(),
-      paymentPayload: fakePaymentPayload,
-      paymentRequirements: fakePaymentRequirements,
+      billing: { kind: "x402", paymentPayload: fakePaymentPayload, paymentRequirements: fakePaymentRequirements },
     };
     const message = fakeMessage(job);
     const batch = { messages: [message], queue: "quikgater-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
@@ -410,8 +424,7 @@ describe("Queue consumer (queue())", () => {
       url: "https://example.com",
       attempt: 1,
       requestedAt: Date.now(),
-      paymentPayload: fakePaymentPayload,
-      paymentRequirements: fakePaymentRequirements,
+      billing: { kind: "x402", paymentPayload: fakePaymentPayload, paymentRequirements: fakePaymentRequirements },
     };
     const message = fakeMessage(job);
     const batch = { messages: [message], queue: "quikgater-render-queue", ackAll: vi.fn(), retryAll: vi.fn() };
@@ -594,5 +607,202 @@ describe("Layer 1 (cheap in-Worker fetch)", () => {
     );
     const body = (await res.json()) as { accepts: { maxAmountRequired: string }[] };
     expect(body.accepts[0]?.maxAmountRequired).toBe("80000");
+  });
+});
+
+async function hmacHex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function fakeStripeSignatureHeader(secret: string, rawBody: string): Promise<string> {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const v1 = await hmacHex(secret, `${timestamp}.${rawBody}`);
+  return `t=${timestamp},v1=${v1}`;
+}
+
+describe("Rail B: POST /v1/credits/checkout", () => {
+  it("mints a new API key and account when none is provided", async () => {
+    const res = await run(
+      new Request("https://worker.example/v1/credits/checkout", {
+        method: "POST",
+        body: JSON.stringify({ amountUsd: 20 }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; apiKey: string; isNewAccount: boolean; checkoutUrl: string };
+    expect(body.success).toBe(true);
+    expect(body.apiKey).toMatch(/^qg_/);
+    expect(body.isNewAccount).toBe(true);
+    expect(body.checkoutUrl).toBe("https://checkout.stripe.com/cs_mock_123");
+    expect(await getAccount(env as Env, body.apiKey)).toMatchObject({ balanceAtomic: 0 });
+    expect(createDepositCheckoutSession).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ amountUsd: 20, apiKey: body.apiKey }),
+    );
+  });
+
+  it("reuses an existing account when an apiKey is provided", async () => {
+    await createAccount(env as Env, "qg_existing_checkout");
+    const res = await run(
+      new Request("https://worker.example/v1/credits/checkout", {
+        method: "POST",
+        body: JSON.stringify({ amountUsd: 5, apiKey: "qg_existing_checkout" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { apiKey: string; isNewAccount: boolean };
+    expect(body.apiKey).toBe("qg_existing_checkout");
+    expect(body.isNewAccount).toBe(false);
+  });
+
+  it("rejects an unknown apiKey", async () => {
+    const res = await run(
+      new Request("https://worker.example/v1/credits/checkout", {
+        method: "POST",
+        body: JSON.stringify({ amountUsd: 5, apiKey: "qg_does_not_exist" }),
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects an amount outside the spec's $5/$20/$100 tiers", async () => {
+    const res = await run(
+      new Request("https://worker.example/v1/credits/checkout", { method: "POST", body: JSON.stringify({ amountUsd: 7 }) }),
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("Rail B: POST /v1/stripe/webhook", () => {
+  it("credits the account on a validly signed checkout.session.completed event", async () => {
+    await createAccount(env as Env, "qg_webhook_credit");
+    const rawBody = JSON.stringify({
+      type: "checkout.session.completed",
+      data: { object: { metadata: { apiKey: "qg_webhook_credit" }, amount_total: 2000 } }, // $20.00
+    });
+    const signature = await fakeStripeSignatureHeader("whsec_fake_for_local_dev_only", rawBody);
+
+    const res = await run(
+      new Request("https://worker.example/v1/stripe/webhook", {
+        method: "POST",
+        headers: { "stripe-signature": signature },
+        body: rawBody,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const account = await getAccount(env as Env, "qg_webhook_credit");
+    expect(account?.balanceAtomic).toBe(20_000_000); // $20.00 in atomic units
+  });
+
+  it("rejects a request with an invalid signature", async () => {
+    const rawBody = JSON.stringify({
+      type: "checkout.session.completed",
+      data: { object: { metadata: { apiKey: "qg_should_not_be_credited" }, amount_total: 2000 } },
+    });
+    const badSignature = await fakeStripeSignatureHeader("whsec_totally_wrong", rawBody);
+
+    const res = await run(
+      new Request("https://worker.example/v1/stripe/webhook", {
+        method: "POST",
+        headers: { "stripe-signature": badSignature },
+        body: rawBody,
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(await getAccount(env as Env, "qg_should_not_be_credited")).toBeNull();
+  });
+
+  it("rejects a request with no signature header at all", async () => {
+    const res = await run(new Request("https://worker.example/v1/stripe/webhook", { method: "POST", body: "{}" }));
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("Rail B: GET /v1/credits/balance", () => {
+  it("returns the account balance for a valid Bearer token", async () => {
+    await createAccount(env as Env, "qg_balance_check");
+    await env.CREDITS_KV.put("account:qg_balance_check", JSON.stringify({ apiKey: "qg_balance_check", balanceAtomic: 5_500_000, createdAt: Date.now() }));
+    const res = await run(new Request("https://worker.example/v1/credits/balance", { headers: { authorization: "Bearer qg_balance_check" } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, apiKey: "qg_balance_check", balanceAtomic: 5_500_000, balanceUsd: 5.5 });
+  });
+
+  it("returns 401 with no Authorization header", async () => {
+    const res = await run(new Request("https://worker.example/v1/credits/balance"));
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 for an unknown API key", async () => {
+    const res = await run(new Request("https://worker.example/v1/credits/balance", { headers: { authorization: "Bearer qg_nope" } }));
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("Rail B: Bearer token billing", () => {
+  it("returns 401 for an unknown API key", async () => {
+    const res = await run(req("https://bearer-unknown.example/page", {}, { authorization: "Bearer qg_does_not_exist" }, { withPayment: false }));
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 402 with balance details when the account can't cover the worst-case price", async () => {
+    await createAccount(env as Env, "qg_bearer_broke");
+    const res = await run(req("https://bearer-broke.example/page", {}, { authorization: "Bearer qg_bearer_broke" }, { withPayment: false }));
+    expect(res.status).toBe(402);
+    expect(await res.json()).toMatchObject({ success: false, error: "INSUFFICIENT_CREDITS", balanceAtomic: 0 });
+  });
+
+  it("debits the cache-hit price and serves cached content synchronously", async () => {
+    await createAccount(env as Env, "qg_bearer_cache_hit");
+    await env.CREDITS_KV.put("account:qg_bearer_cache_hit", JSON.stringify({ apiKey: "qg_bearer_cache_hit", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+    const url = "https://bearer-cache-hit.example/docs";
+    await setCached(env, url, { title: "Cached", etag: null, tierUsed: "L2-browserbase", markdown: "# Cached" });
+
+    const res = await run(req(url, { ignore_robots: "true" }, { authorization: "Bearer qg_bearer_cache_hit" }, { withPayment: false }));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { cacheHit: boolean; payment: { method: string; debitedAtomic: number; newBalanceAtomic: number } };
+    expect(body.cacheHit).toBe(true);
+    expect(body.payment).toEqual({ method: "credits", debitedAtomic: 200, newBalanceAtomic: 999_800 });
+  });
+
+  it("debits the real Layer 1 price ($0.002), not Rail A's worst-case $0.08", async () => {
+    vi.mocked(tryLayer1Fetch).mockResolvedValueOnce({ markdown: "# Real Content", title: "Real Content" });
+    await env.CREDITS_KV.put("account:qg_bearer_layer1", JSON.stringify({ apiKey: "qg_bearer_layer1", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+
+    const res = await run(
+      req("https://bearer-layer1.example/page", { ignore_robots: "true" }, { authorization: "Bearer qg_bearer_layer1" }, { withPayment: false }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tierUsed: string; payment: { debitedAtomic: number; newBalanceAtomic: number } };
+    expect(body.tierUsed).toBe("L1");
+    expect(body.payment).toEqual({ method: "credits", debitedAtomic: 2000, newBalanceAtomic: 998_000 });
+  });
+
+  it("enqueues a credits-billed render job when both cache and Layer 1 miss", async () => {
+    await env.CREDITS_KV.put("account:qg_bearer_miss", JSON.stringify({ apiKey: "qg_bearer_miss", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+
+    const res = await run(
+      req("https://bearer-miss.example/page", { ignore_robots: "true" }, { authorization: "Bearer qg_bearer_miss" }, { withPayment: false }),
+    );
+
+    expect(res.status).toBe(202);
+    expect(enqueueRenderJob).toHaveBeenCalledWith(
+      expect.anything(),
+      "https://bearer-miss.example/page",
+      { kind: "credits", apiKey: "qg_bearer_miss" },
+    );
+  });
+
+  it("still enforces the blocklist for Bearer-billed requests", async () => {
+    await env.CREDITS_KV.put("account:qg_bearer_blocked", JSON.stringify({ apiKey: "qg_bearer_blocked", balanceAtomic: 1_000_000, createdAt: Date.now() }));
+    const res = await run(req("https://www.linkedin.com/in/someone", {}, { authorization: "Bearer qg_bearer_blocked" }, { withPayment: false }));
+    expect(res.status).toBe(403);
   });
 });

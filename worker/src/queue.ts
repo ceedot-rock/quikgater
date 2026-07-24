@@ -2,8 +2,9 @@ import type { Env } from "./env";
 import { deriveTitle, setCached } from "./cache";
 import { logRequestCost } from "./costlog";
 import type { CostLogEntry } from "./costlog";
-import { settlePayment } from "./payment";
+import { priceAtomicForTier, settlePayment, FAILURE_PRICE_ATOMIC } from "./payment";
 import type { PaymentPayload, PaymentRequirements } from "./payment";
+import { debitAccount } from "./credits";
 
 // Step 4: Async Queue (spec §3, §8). "Worker no longer calls Fly.io
 // synchronously. v1's sync call caused timeouts. Now async via Queue.
@@ -16,17 +17,22 @@ import type { PaymentPayload, PaymentRequirements } from "./payment";
 // index.ts for where Layer 1 is attempted, and why it doesn't reduce the
 // price charged even when it succeeds.
 
+// Rail A jobs carry the exact signed authorization to settle once (and
+// only if) the render succeeds - see payment.ts for why that amount can't
+// change after the fact. Rail B jobs carry only the apiKey: the amount to
+// debit isn't decided until the real outcome (tierUsed) is known, in
+// settleBilling below - that's the whole advantage of a credits ledger
+// over a pre-signed exact amount (see payment.ts's priceAtomicForTier).
+export type Billing =
+  | { kind: "x402"; paymentPayload: PaymentPayload; paymentRequirements: PaymentRequirements }
+  | { kind: "credits"; apiKey: string };
+
 export interface RenderJob {
   jobId: string;
   url: string;
   attempt: number;
   requestedAt: number;
-  // Carried through so processRenderJob can settle this exact signed
-  // authorization once (and only if) the render actually succeeds - see
-  // payment.ts for why settlement can't just charge a different amount
-  // after the fact.
-  paymentPayload: PaymentPayload;
-  paymentRequirements: PaymentRequirements;
+  billing: Billing;
 }
 
 export type JobStatus =
@@ -48,20 +54,14 @@ function jobKey(jobId: string): string {
   return `job:${jobId}`;
 }
 
-export async function enqueueRenderJob(
-  env: Env,
-  url: string,
-  paymentPayload: PaymentPayload,
-  paymentRequirements: PaymentRequirements,
-): Promise<{ jobId: string }> {
+export async function enqueueRenderJob(env: Env, url: string, billing: Billing): Promise<{ jobId: string }> {
   const jobId = crypto.randomUUID();
   const job: RenderJob = {
     jobId,
     url,
     attempt: 1,
     requestedAt: Date.now(),
-    paymentPayload,
-    paymentRequirements,
+    billing,
   };
 
   // Write "pending" before sending, so a poll that lands between these
@@ -90,14 +90,48 @@ function layerForProvider(providerUsed: string): CostLogEntry["layer"] {
   return "L2";
 }
 
+interface SettleOutcome {
+  success: boolean;
+  transaction?: string;
+  errorReason?: string;
+  chargedAtomic: string;
+}
+
 /**
- * Settles the job's authorization now that content is ready, and writes
- * the final job status either way.
+ * Settles a job's billing now that the real outcome (tierUsed) is known.
+ * Rail A settles the exact pre-signed amount, unaffected by which tier
+ * actually served the request (that amount was fixed at quote time - see
+ * payment.ts). Rail B debits the *real* tier price only now, which is
+ * exactly the outcome-based pricing Rail A structurally can't do.
+ */
+async function settleBilling(env: Env, billing: Billing, tierUsed: CostLogEntry["layer"]): Promise<SettleOutcome> {
+  if (billing.kind === "x402") {
+    const settlement = await settlePayment(billing.paymentPayload, billing.paymentRequirements);
+    return {
+      success: settlement.success,
+      transaction: settlement.success ? settlement.transaction : undefined,
+      errorReason: settlement.success ? undefined : settlement.errorReason,
+      chargedAtomic: billing.paymentRequirements.maxAmountRequired,
+    };
+  }
+  const priceAtomic = priceAtomicForTier(tierUsed as Parameters<typeof priceAtomicForTier>[0]);
+  const debit = await debitAccount(env, billing.apiKey, Number(priceAtomic));
+  return {
+    success: debit.success,
+    errorReason: debit.success ? undefined : debit.reason,
+    chargedAtomic: priceAtomic,
+  };
+}
+
+/**
+ * Settles the job's billing now that content is ready, and writes the
+ * final job status either way.
  *
- * If settlement fails despite the render succeeding (expired
- * authorization, facilitator error, etc.) - a real edge case, not
- * swallowed - the content is still returned to the client (it was
- * already rendered; withholding it doesn't get anyone paid), but
+ * If settlement fails despite the render succeeding (expired x402
+ * authorization/facilitator error, or a credits balance that dropped
+ * below the real tier price between the upfront check and now) - a real
+ * edge case, not swallowed - the content is still returned to the client
+ * (it was already rendered; withholding it doesn't get anyone paid), but
  * `settled: false` and `settlementError` make the failure visible to
  * whoever's watching job status or cost logs, since it means the
  * provider cost was paid but the client wasn't charged.
@@ -109,7 +143,7 @@ async function settleAndWriteDone(
   domain: string,
   start: number,
 ): Promise<void> {
-  const settlement = await settlePayment(job.paymentPayload, job.paymentRequirements);
+  const settlement = await settleBilling(env, job.billing, result.tierUsed);
 
   await writeJobStatus(env, job.jobId, {
     status: "done",
@@ -133,7 +167,7 @@ async function settleAndWriteDone(
     cache_hit: false,
     layer: result.tierUsed,
     cost_actual_usd: result.costActual,
-    charge_usd: settlement.success ? 0.08 : 0,
+    charge_usd: settlement.success ? Number(settlement.chargedAtomic) / 1_000_000 : 0,
     latency_ms: Date.now() - start,
     status: settlement.success ? "success" : "failed",
     ...(settlement.success ? {} : { provider_error: `content rendered but settlement failed: ${settlement.errorReason ?? "unknown"}` }),
@@ -196,8 +230,17 @@ export async function processRenderJob(env: Env, job: RenderJob, fetchImpl: type
     return;
   }
 
-  // Total failure - never settle. The client's authorization simply
-  // expires unused; they are not charged.
+  // Total failure. Rail A: never settle - the client's signed
+  // authorization simply expires unused, they are not charged (still no
+  // way to charge a different amount than what was pre-signed). Rail B:
+  // spec §5 explicitly prices failure at $0.0001 "to cover queue + logs
+  // and prevent abuse" - a credits debit has no signature constraint, so
+  // this is actually chargeable, unlike Rail A.
+  let failureCharged = 0;
+  if (job.billing.kind === "credits") {
+    const debit = await debitAccount(env, job.billing.apiKey, Number(FAILURE_PRICE_ATOMIC));
+    if (debit.success) failureCharged = Number(FAILURE_PRICE_ATOMIC) / 1_000_000;
+  }
   await writeJobStatus(env, job.jobId, { status: "failed", error: "RENDER_FAILED", completedAt: Date.now() });
   logRequestCost({
     url: job.url,
@@ -205,7 +248,7 @@ export async function processRenderJob(env: Env, job: RenderJob, fetchImpl: type
     cache_hit: false,
     layer: "L3",
     cost_actual_usd: null,
-    charge_usd: 0,
+    charge_usd: failureCharged,
     latency_ms: Date.now() - start,
     status: "failed",
     provider_error: "RENDER_FAILED",

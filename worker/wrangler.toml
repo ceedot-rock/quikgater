@@ -59,6 +59,15 @@ preview_id = "1406ec9760144a4c98958dc3dea6fd63"
 binding = "CACHE_R2"
 bucket_name = "quikgater-cache"
 
+# Rail B (deposit credits): API-key -> balance ledger. KV is
+# eventually-consistent, same caveat as RATELIMIT_KV above - a real
+# Durable Object would be needed for exact atomicity under concurrent
+# debits; acceptable for now, same tradeoff already made elsewhere here.
+[[kv_namespaces]]
+binding = "CREDITS_KV"
+id = "abdd6f25f7624e70a5b3074610f43ead"
+preview_id = "1b6d035a86c74b11a3b1a3fb491d52c9"
+
 [vars]
 # Base Sepolia address that receives x402 USDC test payments. Updated
 # 2026-07-24 (previously 0x8542B90d11a5c21722a4A3B1047098a82203e288,
