@@ -10,8 +10,9 @@ import {
   verifyPayment,
 } from "./payment";
 import { enqueueRenderJob, getJobStatus, processRenderJob, type RenderJob } from "./queue";
-import { getCached } from "./cache";
+import { getCached, setCached } from "./cache";
 import { logRequestCost } from "./costlog";
+import { tryLayer1Fetch } from "./layer1";
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -180,10 +181,57 @@ export default {
       );
     }
 
-    // --- Cache miss. Layer 1 (free in-Worker fetch, not built and not
-    // one of the 6 numbered steps) doesn't exist, so unlike the spec's
-    // real design there's no cheaper layer to try before the queue - a
-    // miss goes straight to Step 4's async queue. See queue.ts.
+    // --- Cache miss. Layer 1: try a cheap, direct in-Worker fetch before
+    // falling back to the paid Layer 2/3 render pipeline. Deliberately
+    // attempted here - after payment is verified and Step 1 has passed -
+    // not as a pre-payment price probe. See layer1.ts for the full
+    // reasoning (short version: probing pre-payment would mean an
+    // unauthenticated request can make Quikgater fetch an arbitrary
+    // third-party page for free, and EIP-3009's exact-signed-amount means
+    // the client is still charged the quoted miss price either way - this
+    // saves real provider cost and latency on our end, it doesn't yet pass
+    // a cheaper price through to the client). ---
+    const layer1Result = await tryLayer1Fetch(target);
+    if (layer1Result) {
+      const settlement = await settlePayment(paymentPayload, paymentRequirements);
+      if (!settlement.success) {
+        return jsonResponse(
+          paymentRequiredBody(paymentRequirements, `Settlement failed: ${settlement.errorReason ?? "unknown"}`),
+          402,
+        );
+      }
+      await setCached(env, target, {
+        title: layer1Result.title,
+        etag: null,
+        tierUsed: "L1",
+        markdown: layer1Result.markdown,
+      });
+      logRequestCost({
+        url: target,
+        domain: targetUrl.hostname,
+        cache_hit: false,
+        layer: "L1",
+        cost_actual_usd: 0.00002, // just Worker CPU + one outbound fetch, no paid provider call
+        charge_usd: 0.08, // still the quoted miss price - see layer1.ts on why this isn't the cheaper tier yet
+        latency_ms: Date.now() - requestStart,
+        status: "success",
+      });
+      return jsonResponse(
+        {
+          success: true,
+          markdown: layer1Result.markdown,
+          title: layer1Result.title,
+          cacheHit: false,
+          tierUsed: "L1",
+          payment: { verified: true, settled: true, transaction: settlement.transaction, payer: settlement.payer },
+        },
+        200,
+      );
+    }
+
+    // Layer 1 also failed (network error, timeout, JS-shell SPA, or an
+    // active bot challenge) - fall back to Step 4's async render queue
+    // (Layer 2/3), exactly as before Layer 1 existed.
     //
     // Settlement is deliberately DEFERRED, not skipped: the queue consumer
     // (processRenderJob) settles this exact authorization once it knows

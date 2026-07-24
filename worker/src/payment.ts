@@ -69,15 +69,14 @@ interface SettleResponse {
 // CACHE_HIT: $0.0002, matches spec §5's cache tier - known immediately,
 // settled synchronously in index.ts.
 //
-// MISS: $0.08, NOT the spec's $0.002 "standard fetch" rate. Layer 1
-// (free in-Worker fetch) isn't built, so every cache miss is actually a
-// full Layer 2 render attempt (worker/src/queue.ts calls
-// browser-worker's /render directly) - pricing it at $0.002 would mean
-// losing money on every single successful render (real provider cost
-// $0.01-0.05 vs a $0.002 charge). $0.08 matches the render tier's real
-// economics (see the Step 5/pricing-margin work earlier in this repo's
-// history). Revisit if Layer 1 ever gets built and misses split into
-// "tried free fetch" vs "needed full render."
+// MISS: $0.08, NOT the spec's $0.002 "standard fetch" rate - still true
+// even now that Layer 1 (worker/src/layer1.ts) exists. The price is
+// quoted here, before the client signs anything, so it can't yet reflect
+// whether Layer 1 will end up handling the request instead of a full
+// Layer 2 render - that's only known after payment is verified (see
+// layer1.ts for why probing any earlier isn't safe). $0.08 is priced for
+// the worst case (a full render, real provider cost $0.01-0.05), so every
+// outcome - Layer 1 or Layer 2 - is profitable, not just render attempts.
 export const CACHE_HIT_PRICE_ATOMIC = "200"; // $0.0002
 export const MISS_PRICE_ATOMIC = "80000"; // $0.08
 

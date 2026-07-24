@@ -41,11 +41,26 @@ vi.mock("../src/queue", async (importOriginal) => {
   };
 });
 
+// Layer 1 does a real outbound fetch to the target URL - mocked here for
+// the same reason payment/queue are: unit tests shouldn't depend on real
+// network calls. Defaults to null (Layer 1 "fails") so every existing
+// cache-miss test keeps falling through to the queue exactly as before
+// Layer 1 existed; tests that care about the Layer 1 success path
+// override this per-case.
+vi.mock("../src/layer1", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/layer1")>();
+  return {
+    ...actual,
+    tryLayer1Fetch: vi.fn(async () => null),
+  };
+});
+
 import { settlePayment, verifyPayment } from "../src/payment";
 import type { PaymentPayload, PaymentRequirements } from "../src/payment";
 import { enqueueRenderJob, getJobStatus, processRenderJob } from "../src/queue";
 import type { RenderJob } from "../src/queue";
 import { setCached } from "../src/cache";
+import { tryLayer1Fetch } from "../src/layer1";
 
 const fakePaymentPayload: PaymentPayload = {
   x402Version: 1,
@@ -132,6 +147,8 @@ beforeEach(() => {
   vi.mocked(enqueueRenderJob).mockClear();
   vi.mocked(processRenderJob).mockClear();
   vi.mocked(processRenderJob).mockResolvedValue(undefined);
+  vi.mocked(tryLayer1Fetch).mockClear();
+  vi.mocked(tryLayer1Fetch).mockResolvedValue(null);
 });
 
 describe("Payment gate (x402)", () => {
@@ -487,5 +504,95 @@ describe("Layer 0 cache (Step 5)", () => {
     const missRes = await run(req("https://price-check-miss.example/page", {}, {}, { withPayment: false }));
     const missBody = (await missRes.json()) as { accepts: { maxAmountRequired: string }[] };
     expect(missBody.accepts[0]?.maxAmountRequired).toBe("80000");
+  });
+});
+
+describe("Layer 1 (cheap in-Worker fetch)", () => {
+  it("serves synchronously and settles when Layer 1 succeeds, without enqueuing a render job", async () => {
+    vi.mocked(tryLayer1Fetch).mockResolvedValueOnce({
+      markdown: "# A Real Page\n\nSome server-rendered text.",
+      title: "A Real Page",
+    });
+
+    const res = await run(req("https://layer1-success.example/page", { ignore_robots: "true" }));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      markdown: string;
+      title: string;
+      cacheHit: boolean;
+      tierUsed: string;
+      payment: { verified: boolean; settled: boolean };
+    };
+    expect(body).toMatchObject({
+      markdown: "# A Real Page\n\nSome server-rendered text.",
+      title: "A Real Page",
+      cacheHit: false,
+      tierUsed: "L1",
+    });
+    expect(body.payment).toEqual({
+      verified: true,
+      settled: true,
+      transaction: "0xMockTransactionHash",
+      payer: "0xTestPayer",
+    });
+    expect(settlePayment).toHaveBeenCalled();
+    expect(enqueueRenderJob).not.toHaveBeenCalled();
+  });
+
+  it("populates the Layer 0 cache after a Layer 1 success, so the next request is a cache hit", async () => {
+    vi.mocked(tryLayer1Fetch).mockResolvedValueOnce({
+      markdown: "# Cache Me\n\nContent.",
+      title: "Cache Me",
+    });
+    const url = "https://layer1-then-cache.example/page";
+
+    const first = await run(req(url, { ignore_robots: "true" }));
+    expect(first.status).toBe(200);
+
+    const second = await run(req(url, { ignore_robots: "true" }));
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { cacheHit: boolean; tierUsed: string };
+    expect(secondBody.cacheHit).toBe(true);
+    expect(secondBody.tierUsed).toBe("L1");
+    // Second request is a real Layer 0 hit - Layer 1 shouldn't run again.
+    expect(tryLayer1Fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the queue when Layer 1 returns null", async () => {
+    // Default mock already resolves to null - this is the pre-Layer-1
+    // behavior, explicitly asserted rather than just relied upon.
+    const res = await run(req("https://layer1-fails.example/page", { ignore_robots: "true" }));
+    expect(res.status).toBe(202);
+    expect(tryLayer1Fetch).toHaveBeenCalledWith("https://layer1-fails.example/page");
+    expect(enqueueRenderJob).toHaveBeenCalled();
+  });
+
+  it("does not serve Layer 1 content when settlement fails", async () => {
+    vi.mocked(tryLayer1Fetch).mockResolvedValueOnce({ markdown: "# X", title: "X" });
+    vi.mocked(settlePayment).mockResolvedValueOnce({
+      success: false,
+      errorReason: "insufficient_funds",
+      transaction: "",
+      network: "base-sepolia",
+      payer: "0xTestPayer",
+    });
+
+    const res = await run(req("https://layer1-settle-fail.example/page", { ignore_robots: "true" }));
+
+    expect(res.status).toBe(402);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: expect.stringContaining("insufficient_funds"),
+    });
+  });
+
+  it("still quotes the full miss price ($0.08) up front, even for a URL Layer 1 will end up handling", async () => {
+    // Layer 1's outcome isn't known until after payment is verified, so
+    // the up-front 402 quote can't reflect it yet - see layer1.ts.
+    const res = await run(
+      req("https://layer1-price-check.example/page", {}, {}, { withPayment: false }),
+    );
+    const body = (await res.json()) as { accepts: { maxAmountRequired: string }[] };
+    expect(body.accepts[0]?.maxAmountRequired).toBe("80000");
   });
 });

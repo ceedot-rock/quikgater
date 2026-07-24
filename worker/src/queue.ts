@@ -10,12 +10,11 @@ import type { PaymentPayload, PaymentRequirements } from "./payment";
 // Worker returns 202 ... with job_id for polling."
 //
 // Scope note: the spec reserves the queue for requests that miss Layer 0
-// (cache, Step 5) AND fail Layer 1 (free in-Worker fetch - not built,
-// not one of the 6 numbered steps either). Neither exists yet, so right
-// now EVERY request that clears the Step 1 shield goes straight to the
-// queue - there's no cheaper layer in front of it to skip. That's more
-// expensive than the spec's real design, not a bug in this wiring; note
-// it in the README rather than fake a Layer 1 that isn't built.
+// (cache, Step 5) AND fail Layer 1 (a cheap in-Worker fetch - see
+// layer1.ts, now built, not one of the 6 numbered steps). A request only
+// reaches this queue if both Layer 0 and Layer 1 came up empty - see
+// index.ts for where Layer 1 is attempted, and why it doesn't reduce the
+// price charged even when it succeeds.
 
 export interface RenderJob {
   jobId: string;
