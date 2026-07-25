@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as browserbase from "../src/providers/browserbase.js";
 import * as steeldev from "../src/providers/steeldev.js";
 import * as firecrawl from "../src/providers/firecrawl.js";
+import * as scraperapi from "../src/providers/scraperapi.js";
 
 const originalEnv = { ...process.env };
 const originalFetch = global.fetch;
@@ -132,5 +133,43 @@ describe("firecrawl.scrape", () => {
     ) as unknown as typeof fetch;
 
     await expect(firecrawl.scrape("https://example.com")).rejects.toThrow("no markdown content");
+  });
+});
+
+describe("scraperapi.scrape", () => {
+  it("throws without SCRAPERAPI_KEY configured, without making a network call", async () => {
+    delete process.env.SCRAPERAPI_KEY;
+    const fetchSpy = vi.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(scraperapi.scrape("https://example.com")).rejects.toThrow("SCRAPERAPI_KEY");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("calls the real endpoint with render+ultra_premium and converts the HTML response to markdown", async () => {
+    process.env.SCRAPERAPI_KEY = "test-key";
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const requestUrl = new URL(String(input));
+      expect(requestUrl.origin + requestUrl.pathname).toBe("https://api.scraperapi.com/");
+      expect(requestUrl.searchParams.get("api_key")).toBe("test-key");
+      expect(requestUrl.searchParams.get("url")).toBe("https://example.com");
+      expect(requestUrl.searchParams.get("render")).toBe("true");
+      expect(requestUrl.searchParams.get("ultra_premium")).toBe("true");
+      return new Response("<html><body><h1>Hi</h1><p>Real content.</p></body></html>", { status: 200 });
+    });
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    const result = await scraperapi.scrape("https://example.com");
+    expect(result.provider).toBe("scraperapi");
+    expect(result.costActual).toBeNull();
+    expect(result.markdown).toContain("# Hi");
+    expect(result.markdown).toContain("Real content.");
+  });
+
+  it("throws on a non-ok response", async () => {
+    process.env.SCRAPERAPI_KEY = "test-key";
+    global.fetch = vi.fn(async () => new Response("blocked", { status: 403 })) as unknown as typeof fetch;
+
+    await expect(scraperapi.scrape("https://example.com")).rejects.toThrow("scraperapi request failed: 403");
   });
 });
