@@ -65,6 +65,7 @@ vi.mock("../src/stripe", async (importOriginal) => {
   return {
     ...actual,
     createDepositCheckoutSession: vi.fn(async () => ({ id: "cs_mock_123", url: "https://checkout.stripe.com/cs_mock_123" })),
+    createProSubscriptionCheckoutSession: vi.fn(async () => ({ id: "cs_sub_mock_123", url: "https://checkout.stripe.com/cs_sub_mock_123" })),
   };
 });
 
@@ -72,10 +73,10 @@ import { settlePayment, verifyPayment } from "../src/payment";
 import type { PaymentPayload, PaymentRequirements } from "../src/payment";
 import { enqueueRenderJob, getJobStatus, processRenderJob } from "../src/queue";
 import type { RenderJob } from "../src/queue";
-import { setCached } from "../src/cache";
+import { setCached, cacheKey, normalizeUrl } from "../src/cache";
 import { tryLayer1Fetch } from "../src/layer1";
-import { createDepositCheckoutSession } from "../src/stripe";
-import { createAccount, getAccount } from "../src/credits";
+import { createDepositCheckoutSession, createProSubscriptionCheckoutSession } from "../src/stripe";
+import { createAccount, getAccount, setProStatus } from "../src/credits";
 import type { Env } from "../src/env";
 
 const fakePaymentPayload: PaymentPayload = {
@@ -770,7 +771,7 @@ describe("Rail B: POST /v1/stripe/webhook", () => {
     await createAccount(env as Env, "qg_webhook_credit");
     const rawBody = JSON.stringify({
       type: "checkout.session.completed",
-      data: { object: { metadata: { apiKey: "qg_webhook_credit" }, amount_total: 2000 } }, // $20.00
+      data: { object: { mode: "payment", metadata: { apiKey: "qg_webhook_credit" }, amount_total: 2000 } }, // $20.00
     });
     const signature = await fakeStripeSignatureHeader("whsec_fake_for_local_dev_only", rawBody);
 
@@ -892,5 +893,132 @@ describe("Rail B: Bearer token billing", () => {
     await env.CREDITS_KV.put("account:qg_bearer_blocked", JSON.stringify({ apiKey: "qg_bearer_blocked", balanceAtomic: 1_000_000, createdAt: Date.now() }));
     const res = await run(req("https://www.linkedin.com/in/someone", {}, { authorization: "Bearer qg_bearer_blocked" }, { withPayment: false }));
     expect(res.status).toBe(403);
+  });
+});
+
+describe("Quikgater Pro: POST /v1/pro/checkout", () => {
+  it("mints a new API key and account when none is provided", async () => {
+    const res = await run(new Request("https://worker.example/v1/pro/checkout", { method: "POST", body: JSON.stringify({}) }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; apiKey: string; isNewAccount: boolean; checkoutUrl: string };
+    expect(body.success).toBe(true);
+    expect(body.apiKey).toMatch(/^qg_/);
+    expect(body.isNewAccount).toBe(true);
+    expect(body.checkoutUrl).toBe("https://checkout.stripe.com/cs_sub_mock_123");
+    expect(createProSubscriptionCheckoutSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ apiKey: body.apiKey }));
+  });
+
+  it("reuses an existing account when an apiKey is provided", async () => {
+    await createAccount(env as Env, "qg_existing_pro_checkout");
+    const res = await run(
+      new Request("https://worker.example/v1/pro/checkout", { method: "POST", body: JSON.stringify({ apiKey: "qg_existing_pro_checkout" }) }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { apiKey: string; isNewAccount: boolean };
+    expect(body.apiKey).toBe("qg_existing_pro_checkout");
+    expect(body.isNewAccount).toBe(false);
+  });
+
+  it("rejects an unknown apiKey", async () => {
+    const res = await run(
+      new Request("https://worker.example/v1/pro/checkout", { method: "POST", body: JSON.stringify({ apiKey: "qg_does_not_exist" }) }),
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("Quikgater Pro: POST /v1/stripe/webhook (subscription events)", () => {
+  it("activates Pro on the initial subscription checkout completion", async () => {
+    await createAccount(env as Env, "qg_pro_webhook_activate");
+    const rawBody = JSON.stringify({
+      type: "checkout.session.completed",
+      data: { object: { mode: "subscription", metadata: { apiKey: "qg_pro_webhook_activate" }, subscription: "sub_activate_1" } },
+    });
+    const signature = await fakeStripeSignatureHeader("whsec_fake_for_local_dev_only", rawBody);
+
+    const res = await run(
+      new Request("https://worker.example/v1/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body: rawBody }),
+    );
+
+    expect(res.status).toBe(200);
+    const account = await getAccount(env as Env, "qg_pro_webhook_activate");
+    expect(account?.pro).toMatchObject({ active: true, subscriptionId: "sub_activate_1" });
+  });
+
+  it("deactivates Pro on a past_due customer.subscription.updated event", async () => {
+    await setProStatus(env as Env, "qg_pro_webhook_pastdue", { active: true, subscriptionId: "sub_pastdue_1" });
+    const rawBody = JSON.stringify({
+      type: "customer.subscription.updated",
+      data: { object: { id: "sub_pastdue_1", status: "past_due", metadata: { apiKey: "qg_pro_webhook_pastdue" } } },
+    });
+    const signature = await fakeStripeSignatureHeader("whsec_fake_for_local_dev_only", rawBody);
+
+    const res = await run(
+      new Request("https://worker.example/v1/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body: rawBody }),
+    );
+
+    expect(res.status).toBe(200);
+    const account = await getAccount(env as Env, "qg_pro_webhook_pastdue");
+    expect(account?.pro?.active).toBe(false);
+  });
+
+  it("deactivates Pro on customer.subscription.deleted", async () => {
+    await setProStatus(env as Env, "qg_pro_webhook_deleted", { active: true, subscriptionId: "sub_deleted_1" });
+    const rawBody = JSON.stringify({
+      type: "customer.subscription.deleted",
+      data: { object: { id: "sub_deleted_1", status: "canceled", metadata: { apiKey: "qg_pro_webhook_deleted" } } },
+    });
+    const signature = await fakeStripeSignatureHeader("whsec_fake_for_local_dev_only", rawBody);
+
+    const res = await run(
+      new Request("https://worker.example/v1/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body: rawBody }),
+    );
+
+    expect(res.status).toBe(200);
+    const account = await getAccount(env as Env, "qg_pro_webhook_deleted");
+    expect(account?.pro?.active).toBe(false);
+  });
+});
+
+describe("Quikgater Pro: GET /v1/pro/status", () => {
+  it("returns proActive: true for an active subscriber", async () => {
+    await setProStatus(env as Env, "qg_pro_status_active", { active: true, subscriptionId: "sub_status_1" });
+    const res = await run(new Request("https://worker.example/v1/pro/status", { headers: { authorization: "Bearer qg_pro_status_active" } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, apiKey: "qg_pro_status_active", proActive: true, subscriptionId: "sub_status_1" });
+  });
+
+  it("returns proActive: false for an account that never subscribed", async () => {
+    await createAccount(env as Env, "qg_pro_status_never");
+    const res = await run(new Request("https://worker.example/v1/pro/status", { headers: { authorization: "Bearer qg_pro_status_never" } }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { proActive: boolean };
+    expect(body.proActive).toBe(false);
+  });
+
+  it("returns 401 for an unknown API key", async () => {
+    const res = await run(new Request("https://worker.example/v1/pro/status", { headers: { authorization: "Bearer qg_nope" } }));
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("Quikgater Pro: 7-day cache TTL floor on the Bearer/Layer-1 path", () => {
+  it("caches a Pro caller's Layer 1 result for ~7 days, not the URL-shape tier's normal TTL", async () => {
+    vi.mocked(tryLayer1Fetch).mockResolvedValueOnce({ markdown: "# Real", title: "Real" });
+    await setProStatus(env as Env, "qg_pro_ttl_floor", { active: true, subscriptionId: "sub_ttl_1" });
+    await env.CREDITS_KV.put(
+      "account:qg_pro_ttl_floor",
+      JSON.stringify({ apiKey: "qg_pro_ttl_floor", balanceAtomic: 1_000_000, createdAt: Date.now(), pro: { active: true, subscriptionId: "sub_ttl_1", updatedAt: Date.now() } }),
+    );
+    const url = "https://pro-ttl-floor.example/news/breaking"; // "news" tier's own TTL is only 300s
+
+    const res = await run(req(url, { ignore_robots: "true" }, { authorization: "Bearer qg_pro_ttl_floor" }, { withPayment: false }));
+    expect(res.status).toBe(200);
+
+    const hash = await cacheKey(normalizeUrl(url), "markdown");
+    const list = await env.CACHE_KV.list({ prefix: `cache:${hash}` });
+    const entry = list.keys[0];
+    const secondsFromNow = (entry!.expiration as number) - Math.floor(Date.now() / 1000);
+    expect(secondsFromNow).toBeGreaterThan(24 * 60 * 60); // nowhere near news' 300s
   });
 });

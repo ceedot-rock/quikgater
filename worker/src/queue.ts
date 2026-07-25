@@ -1,10 +1,10 @@
 import type { Env } from "./env";
-import { deriveTitle, setCached } from "./cache";
+import { deriveTitle, setCached, PRO_CACHE_TTL_SECONDS } from "./cache";
 import { logRequestCost } from "./costlog";
 import type { CostLogEntry } from "./costlog";
 import { priceAtomicForTier, settlePayment, FAILURE_PRICE_ATOMIC } from "./payment";
 import type { PaymentPayload, PaymentRequirements } from "./payment";
-import { debitAccount } from "./credits";
+import { debitAccount, getAccount, isProActive } from "./credits";
 
 // Step 4: Async Queue (spec §3, §8). "Worker no longer calls Fly.io
 // synchronously. v1's sync call caused timeouts. Now async via Queue.
@@ -139,7 +139,13 @@ async function settleBilling(env: Env, billing: Billing, tierUsed: CostLogEntry[
 async function settleAndWriteDone(
   env: Env,
   job: RenderJob,
-  result: { markdown: string; providerUsed: string; tierUsed: CostLogEntry["layer"]; costActual: number | null },
+  result: {
+    markdown: string;
+    providerUsed: string;
+    tierUsed: CostLogEntry["layer"];
+    costActual: number | null;
+    title: string | null;
+  },
   domain: string,
   start: number,
 ): Promise<void> {
@@ -154,12 +160,27 @@ async function settleAndWriteDone(
     ...(settlement.success ? { transaction: settlement.transaction } : { settlementError: settlement.errorReason }),
   });
 
-  await setCached(env, job.url, {
-    title: deriveTitle(result.markdown, job.url),
-    etag: null,
-    tierUsed: result.tierUsed,
-    markdown: result.markdown,
-  });
+  // Quikgater Pro's 7-day cache-TTL floor (see cache.ts) only applies to
+  // Rail B (credits) jobs - only those carry an apiKey to check Pro status
+  // against; Rail A (x402) jobs have no account concept at all.
+  const proActive = job.billing.kind === "credits" ? isProActive(await getAccount(env, job.billing.apiKey)) : false;
+
+  // Prefer a provider-reported real title (Steel/Firecrawl/ScraperAPI, see
+  // README's former "no title extraction" gap) over deriveTitle()'s
+  // markdown-heading/URL heuristic, which now only fires for Browserbase
+  // (the one provider with no title in its response envelope).
+  await setCached(
+    env,
+    job.url,
+    {
+      title: result.title ?? deriveTitle(result.markdown, job.url),
+      etag: null,
+      tierUsed: result.tierUsed,
+      markdown: result.markdown,
+    },
+    undefined,
+    proActive ? PRO_CACHE_TTL_SECONDS : undefined,
+  );
 
   logRequestCost({
     url: job.url,
@@ -196,7 +217,12 @@ export async function processRenderJob(env: Env, job: RenderJob, fetchImpl: type
   });
 
   if (renderRes.ok) {
-    const body = (await renderRes.json()) as { markdown: string; providerUsed: string; costActual?: number };
+    const body = (await renderRes.json()) as {
+      markdown: string;
+      providerUsed: string;
+      costActual?: number;
+      title?: string | null;
+    };
     await settleAndWriteDone(
       env,
       job,
@@ -205,6 +231,7 @@ export async function processRenderJob(env: Env, job: RenderJob, fetchImpl: type
         providerUsed: body.providerUsed,
         tierUsed: layerForProvider(body.providerUsed),
         costActual: body.costActual ?? null,
+        title: body.title ?? null,
       },
       domain,
       start,
@@ -219,11 +246,22 @@ export async function processRenderJob(env: Env, job: RenderJob, fetchImpl: type
   });
 
   if (fallbackRes.ok) {
-    const body = (await fallbackRes.json()) as { markdown: string; provider: string; costActual?: number };
+    const body = (await fallbackRes.json()) as {
+      markdown: string;
+      provider: string;
+      costActual?: number;
+      title?: string | null;
+    };
     await settleAndWriteDone(
       env,
       job,
-      { markdown: body.markdown, providerUsed: body.provider, tierUsed: "L3", costActual: body.costActual ?? null },
+      {
+        markdown: body.markdown,
+        providerUsed: body.provider,
+        tierUsed: "L3",
+        costActual: body.costActual ?? null,
+        title: body.title ?? null,
+      },
       domain,
       start,
     );

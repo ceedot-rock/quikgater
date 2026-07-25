@@ -130,15 +130,25 @@ export interface SetCacheInput {
   markdown: string;
 }
 
+// Quikgater Pro's "7-day cache TTL" perk: a flat floor applied on top of
+// classifyTtl's normal URL-shape tiers, not a replacement for them - a Pro
+// caller still gets tier bookkeeping (ttlTier in metadata stays accurate
+// for logging/tuning) but the entry lives at least this long regardless of
+// tier, since the whole point of the perk is fewer paid re-renders for a
+// paying subscriber.
+export const PRO_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 export async function setCached(
   env: Env,
   url: string,
   input: SetCacheInput,
   renderMode: string = DEFAULT_RENDER_MODE,
+  ttlSecondsFloor?: number,
 ): Promise<void> {
   const normalized = normalizeUrl(url);
   const hash = await cacheKey(normalized, renderMode);
   const { tier, ttlSeconds } = classifyTtl(new URL(normalized));
+  const finalTtlSeconds = ttlSecondsFloor ? Math.max(ttlSeconds, ttlSecondsFloor) : ttlSeconds;
 
   const metadata: CacheMetadata = {
     title: input.title,
@@ -154,5 +164,5 @@ export async function setCached(
   // scale; add an R2 lifecycle rule (or a sweep job keyed off KV's expiry
   // events) before this matters in practice.
   await env.CACHE_R2.put(r2Key(hash), input.markdown);
-  await env.CACHE_KV.put(kvKey(hash), JSON.stringify(metadata), { expirationTtl: ttlSeconds });
+  await env.CACHE_KV.put(kvKey(hash), JSON.stringify(metadata), { expirationTtl: finalTtlSeconds });
 }

@@ -6,6 +6,7 @@ import {
   deriveTitle,
   getCached,
   normalizeUrl,
+  PRO_CACHE_TTL_SECONDS,
   setCached,
 } from "../src/cache";
 import type { Env } from "../src/env";
@@ -138,5 +139,35 @@ describe("getCached / setCached", () => {
 
     const result = await getCached(env as Env, url);
     expect(result).toBeNull();
+  });
+
+  it("applies the Pro TTL floor when it's longer than the URL-shape tier's own TTL", async () => {
+    const url = "https://pro-floor-news.example/news/breaking-story";
+    const hash = await cacheKey(normalizeUrl(url), "markdown");
+    // news' own tier TTL is only 300s (see classifyTtl) - the Pro floor
+    // (7 days) should win, since it's the longer of the two.
+    await setCached(env as Env, url, { title: "T", etag: null, tierUsed: "L2-browserbase", markdown: "# T" }, undefined, PRO_CACHE_TTL_SECONDS);
+
+    const list = await env.CACHE_KV.list({ prefix: `cache:${hash}` });
+    const entry = list.keys[0];
+    expect(entry?.expiration).toBeDefined();
+    const secondsFromNow = (entry!.expiration as number) - Math.floor(Date.now() / 1000);
+    // Allow slack for test execution time, but this should be close to 7
+    // days out, not classifyTtl's 300s for a "news" URL.
+    expect(secondsFromNow).toBeGreaterThan(PRO_CACHE_TTL_SECONDS - 60);
+  });
+
+  it("does not shorten a tier's own longer TTL when the Pro floor is smaller (docs' 24h already exceeds it in this hypothetical)", async () => {
+    // Sanity check on the Math.max semantics: floor never shortens
+    // whatever classifyTtl would have picked on its own.
+    const url = "https://pro-floor-docs.example/docs/guide";
+    const hash = await cacheKey(normalizeUrl(url), "markdown");
+    const shortFloor = 60; // shorter than docs' own 24h tier TTL
+    await setCached(env as Env, url, { title: "T", etag: null, tierUsed: "L2-browserbase", markdown: "# T" }, undefined, shortFloor);
+
+    const list = await env.CACHE_KV.list({ prefix: `cache:${hash}` });
+    const entry = list.keys[0];
+    const secondsFromNow = (entry!.expiration as number) - Math.floor(Date.now() / 1000);
+    expect(secondsFromNow).toBeGreaterThan(24 * 60 * 60 - 60); // still ~24h, not 60s
   });
 });

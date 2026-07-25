@@ -11,12 +11,17 @@ export interface RenderResult {
   // Steel's scrape response has no per-call dollar-cost field - null
   // here is honest, not a placeholder for a real number.
   costActual: number | null;
+  title: string | null;
 }
 
 const STEEL_SCRAPE_URL = "https://api.steel.dev/v1/scrape";
 
 interface SteelScrapeResponse {
   content: { markdown?: string };
+  // Confirmed against steel-dev/steel-python's generated scrape_response.py
+  // types on GitHub, not memory: `metadata.title` is a real top-level
+  // sibling of `content`, not nested inside it.
+  metadata?: { title?: string };
 }
 
 export async function render(url: string, signal?: AbortSignal): Promise<RenderResult> {
@@ -39,5 +44,10 @@ export async function render(url: string, signal?: AbortSignal): Promise<RenderR
     throw new Error("steel.dev scrape returned no markdown content");
   }
 
-  return { markdown: body.content.markdown, providerUsed: "steeldev", costActual: null };
+  return {
+    markdown: body.content.markdown,
+    providerUsed: "steeldev",
+    costActual: null,
+    title: body.metadata?.title?.trim() || null,
+  };
 }

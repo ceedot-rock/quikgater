@@ -13,11 +13,19 @@ import {
   STANDARD_FETCH_PRICE_ATOMIC,
 } from "./payment";
 import { enqueueRenderJob, getJobStatus, processRenderJob, type RenderJob } from "./queue";
-import { getCached, setCached } from "./cache";
+import { getCached, setCached, PRO_CACHE_TTL_SECONDS } from "./cache";
 import { logRequestCost } from "./costlog";
 import { tryLayer1Fetch } from "./layer1";
-import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount } from "./credits";
-import { createDepositCheckoutSession, isValidDepositAmount, parseCheckoutCompletedEvent, verifyWebhookSignature } from "./stripe";
+import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount, isProActive, setProStatus } from "./credits";
+import {
+  createDepositCheckoutSession,
+  createProSubscriptionCheckoutSession,
+  isValidDepositAmount,
+  parseCheckoutCompletedEvent,
+  parseSubscriptionCheckoutCompletedEvent,
+  parseSubscriptionStatusEvent,
+  verifyWebhookSignature,
+} from "./stripe";
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -35,7 +43,14 @@ const JOB_STATUS_PATH_PREFIX = "/v1/job/";
  * branches for where each rail calls this, and why it runs at a different
  * point relative to their respective payment checks.
  */
-async function runStep1Checks(env: Env, target: string, targetUrl: URL, requesterId: string, url: URL): Promise<Response | null> {
+async function runStep1Checks(
+  env: Env,
+  target: string,
+  targetUrl: URL,
+  requesterId: string,
+  url: URL,
+  isPro = false,
+): Promise<Response | null> {
   const dynamicListRaw = await env.BLOCKLIST_KV.get("dynamic-blocklist:json");
   const dynamicPatterns: string[] = dynamicListRaw ? JSON.parse(dynamicListRaw) : [];
   const blockResult = isBlocklisted(targetUrl.hostname, dynamicPatterns);
@@ -56,7 +71,7 @@ async function runStep1Checks(env: Env, target: string, targetUrl: URL, requeste
     console.log(JSON.stringify({ event: "ignore_robots_used", url: target }));
   }
 
-  const { limited } = await checkRateLimit(env, requesterId, targetUrl.hostname);
+  const { limited } = await checkRateLimit(env, requesterId, targetUrl.hostname, isPro);
   if (limited) {
     return jsonResponse({ success: false, error: "RATE_LIMITED" }, 429);
   }
@@ -125,17 +140,70 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
     return jsonResponse({ success: false, error: "INVALID_JSON_BODY" }, 400);
   }
 
+  // One endpoint handles both products - Rail B deposits and Quikgater Pro
+  // subscriptions - since they're both driven by the same Stripe account's
+  // webhook. Each parser returns null for event shapes it doesn't own (see
+  // stripe.ts's mode checks), so trying all three in sequence is safe.
   const completed = parseCheckoutCompletedEvent(event);
-  if (!completed) {
-    // Signature-verified but not the event type we handle (the endpoint
-    // is only subscribed to checkout.session.completed, but defensive
-    // either way) - ack with 200 so Stripe doesn't retry indefinitely.
-    return jsonResponse({ success: true, ignored: true }, 200);
+  if (completed) {
+    const amountAtomic = completed.amountTotalCents * 10_000; // Stripe cents -> atomic units (1e-6 USD), see credits.ts
+    await creditAccount(env, completed.apiKey, amountAtomic);
+    return jsonResponse({ success: true }, 200);
   }
 
-  const amountAtomic = completed.amountTotalCents * 10_000; // Stripe cents -> atomic units (1e-6 USD), see credits.ts
-  await creditAccount(env, completed.apiKey, amountAtomic);
-  return jsonResponse({ success: true }, 200);
+  const subscriptionStarted = parseSubscriptionCheckoutCompletedEvent(event);
+  if (subscriptionStarted) {
+    await setProStatus(env, subscriptionStarted.apiKey, { active: true, subscriptionId: subscriptionStarted.subscriptionId });
+    return jsonResponse({ success: true }, 200);
+  }
+
+  const subscriptionStatus = parseSubscriptionStatusEvent(event);
+  if (subscriptionStatus) {
+    await setProStatus(env, subscriptionStatus.apiKey, {
+      active: subscriptionStatus.active,
+      subscriptionId: subscriptionStatus.subscriptionId,
+    });
+    return jsonResponse({ success: true }, 200);
+  }
+
+  // Signature-verified but not an event type we handle - ack with 200 so
+  // Stripe doesn't retry indefinitely.
+  return jsonResponse({ success: true, ignored: true }, 200);
+}
+
+/**
+ * Quikgater Pro ($29/mo): starts a real recurring Stripe subscription
+ * checkout. Mirrors handleCreditsCheckout's "mint an API key up front if
+ * none provided" shape - a brand-new Pro subscriber doesn't need to have
+ * used Rail B first.
+ */
+async function handleProCheckout(request: Request, env: Env): Promise<Response> {
+  let body: { apiKey?: string };
+  try {
+    body = (await request.json()) as { apiKey?: string };
+  } catch {
+    return jsonResponse({ success: false, error: "INVALID_JSON_BODY" }, 400);
+  }
+
+  let apiKey = body.apiKey;
+  let isNewAccount = false;
+  if (apiKey) {
+    const existing = await getAccount(env, apiKey);
+    if (!existing) return jsonResponse({ success: false, error: "INVALID_API_KEY" }, 401);
+  } else {
+    apiKey = generateApiKey();
+    await createAccount(env, apiKey);
+    isNewAccount = true;
+  }
+
+  const origin = new URL(request.url).origin;
+  const session = await createProSubscriptionCheckoutSession(env, {
+    apiKey,
+    successUrl: `${origin}/v1/credits/success`,
+    cancelUrl: `${origin}/v1/credits/cancel`,
+  });
+
+  return jsonResponse({ success: true, apiKey, isNewAccount, checkoutUrl: session.url, sessionId: session.id }, 200);
 }
 
 export default {
@@ -180,6 +248,20 @@ export default {
       const account = await getAccount(env, apiKeyForBalance);
       if (!account) return jsonResponse({ success: false, error: "INVALID_API_KEY" }, 401);
       return jsonResponse({ success: true, apiKey: account.apiKey, balanceAtomic: account.balanceAtomic, balanceUsd: account.balanceAtomic / 1_000_000 }, 200);
+    }
+    if (url.pathname === "/v1/pro/checkout" && request.method === "POST") {
+      return handleProCheckout(request, env);
+    }
+    if (url.pathname === "/v1/pro/status") {
+      const authHeaderForPro = request.headers.get("authorization");
+      const apiKeyForPro = authHeaderForPro?.startsWith("Bearer ") ? authHeaderForPro.slice("Bearer ".length) : null;
+      if (!apiKeyForPro) return jsonResponse({ success: false, error: "MISSING_BEARER_TOKEN" }, 401);
+      const account = await getAccount(env, apiKeyForPro);
+      if (!account) return jsonResponse({ success: false, error: "INVALID_API_KEY" }, 401);
+      return jsonResponse(
+        { success: true, apiKey: account.apiKey, proActive: isProActive(account), subscriptionId: account.pro?.subscriptionId },
+        200,
+      );
     }
 
     const target = url.searchParams.get("url");
@@ -277,7 +359,13 @@ export default {
         );
       }
 
-      const step1Result = await runStep1Checks(env, target, targetUrl, requesterId, url);
+      // Quikgater Pro perks (see credits.ts/cache.ts/ratelimit.ts): 2x rate
+      // limit and a 7-day cache TTL floor. Only ever available here - Pro
+      // is tied to a credits account, and only a Bearer-authenticated
+      // request has one to check.
+      const proActive = isProActive(account);
+
+      const step1Result = await runStep1Checks(env, target, targetUrl, requesterId, url, proActive);
       if (step1Result) return step1Result;
 
       const cached = await getCached(env, target);
@@ -320,7 +408,13 @@ export default {
         if (!debit.success) {
           return jsonResponse({ success: false, error: debit.reason }, 402);
         }
-        await setCached(env, target, { title: layer1Result.title, etag: null, tierUsed: "L1", markdown: layer1Result.markdown });
+        await setCached(
+          env,
+          target,
+          { title: layer1Result.title, etag: null, tierUsed: "L1", markdown: layer1Result.markdown },
+          undefined,
+          proActive ? PRO_CACHE_TTL_SECONDS : undefined,
+        );
         logRequestCost({
           url: target,
           domain: targetUrl.hostname,

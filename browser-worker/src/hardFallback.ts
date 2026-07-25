@@ -16,6 +16,7 @@ export interface HardFallbackResponse {
   markdown: string;
   provider: string;
   costActual: number | null;
+  title: string | null;
 }
 
 // No spec-mandated figure for Layer 3 (only Layer 2's 15s total is

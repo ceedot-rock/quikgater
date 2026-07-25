@@ -10,6 +10,12 @@ export interface RenderResult {
   // Browserbase's Fetch API response doesn't report a per-call dollar
   // cost - null here is honest, not a placeholder for a real number.
   costActual: number | null;
+  // The response envelope has no title field at any `format` setting
+  // (confirmed against docs.browserbase.com/features/fetch) - getting one
+  // would need a second, separate `format: "json"` structured-extraction
+  // call, which this path doesn't make. Always null; the caller falls
+  // back to deriveTitle()'s markdown-heading heuristic.
+  title: string | null;
 }
 
 const BROWSERBASE_FETCH_URL = "https://api.browserbase.com/v1/fetch";
@@ -40,5 +46,5 @@ export async function render(url: string, signal?: AbortSignal): Promise<RenderR
     throw new Error("browserbase fetch returned no content");
   }
 
-  return { markdown: body.content, providerUsed: "browserbase", costActual: null };
+  return { markdown: body.content, providerUsed: "browserbase", costActual: null, title: null };
 }

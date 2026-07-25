@@ -25,11 +25,12 @@ describe("render (Layer 2 failover orchestrator)", () => {
       markdown: "# BB",
       providerUsed: "browserbase",
       costActual: null,
+      title: null,
     });
 
     const result = await render("https://example.com");
 
-    expect(result).toEqual({ markdown: "# BB", providerUsed: "browserbase", costActual: null });
+    expect(result).toEqual({ markdown: "# BB", providerUsed: "browserbase", costActual: null, title: null });
     expect(steeldev.render).not.toHaveBeenCalled();
     expect(firecrawl.scrape).not.toHaveBeenCalled();
   });
@@ -40,6 +41,7 @@ describe("render (Layer 2 failover orchestrator)", () => {
       markdown: "# Steel",
       providerUsed: "steeldev",
       costActual: null,
+      title: null,
     });
 
     const result = await render("https://example.com");
@@ -55,6 +57,7 @@ describe("render (Layer 2 failover orchestrator)", () => {
       markdown: "# FC",
       providerUsed: "firecrawl",
       costActual: null,
+      title: null,
     });
 
     const result = await render("https://example.com");
@@ -76,7 +79,12 @@ describe("render (Layer 2 failover orchestrator)", () => {
       expect(signal?.aborted).toBe(false);
       throw new Error("bb down");
     });
-    vi.mocked(steeldev.render).mockResolvedValue({ markdown: "# Steel", providerUsed: "steeldev", costActual: null });
+    vi.mocked(steeldev.render).mockResolvedValue({
+      markdown: "# Steel",
+      providerUsed: "steeldev",
+      costActual: null,
+      title: null,
+    });
 
     await render("https://example.com");
 

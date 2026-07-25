@@ -20,6 +20,15 @@ export interface Account {
   apiKey: string;
   balanceAtomic: number;
   createdAt: number;
+  // Quikgater Pro ($29/mo subscription, see stripe.ts): undefined means
+  // "never subscribed", not "inactive" - both read as not-Pro via
+  // isProActive below, but keeping them distinct preserves subscriptionId
+  // history for a lapsed subscriber instead of erasing it.
+  pro?: { active: boolean; subscriptionId: string; updatedAt: number };
+}
+
+export function isProActive(account: Account | null): boolean {
+  return account?.pro?.active === true;
 }
 
 function accountKey(apiKey: string): string {
@@ -50,6 +59,31 @@ export async function creditAccount(env: Env, apiKey: string, amountAtomic: numb
   const account: Account = existing
     ? { ...existing, balanceAtomic: existing.balanceAtomic + amountAtomic }
     : { apiKey, balanceAtomic: amountAtomic, createdAt: Date.now() };
+  await env.CREDITS_KV.put(accountKey(apiKey), JSON.stringify(account));
+  return account;
+}
+
+/**
+ * Sets (or clears) Pro subscription status on an account, called by the
+ * Stripe webhook handler for both the initial subscription checkout
+ * completion and every later lifecycle event (payment failure,
+ * cancellation, reactivation). Creates the account if it somehow doesn't
+ * exist yet (mirrors creditAccount's same defensive stance) - a real,
+ * confirmed Stripe event shouldn't be dropped just because the account
+ * lookup races the checkout flow that was supposed to create it first.
+ */
+export async function setProStatus(
+  env: Env,
+  apiKey: string,
+  opts: { active: boolean; subscriptionId: string },
+): Promise<Account> {
+  const existing = await getAccount(env, apiKey);
+  const account: Account = {
+    apiKey,
+    balanceAtomic: existing?.balanceAtomic ?? 0,
+    createdAt: existing?.createdAt ?? Date.now(),
+    pro: { active: opts.active, subscriptionId: opts.subscriptionId, updatedAt: Date.now() },
+  };
   await env.CREDITS_KV.put(accountKey(apiKey), JSON.stringify(account));
   return account;
 }

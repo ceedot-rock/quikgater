@@ -48,16 +48,25 @@ async function incrementWindowCounter(
   return count;
 }
 
-/** Per (requester, domain) fetch-pipeline limiter - spec §2 check 3. */
+/**
+ * Per (requester, domain) fetch-pipeline limiter - spec §2 check 3.
+ * `isPro` doubles the ceiling (Quikgater Pro's "2x rate limit" perk, see
+ * credits.ts's isProActive) - only ever true for a Bearer-authenticated
+ * request whose account has an active Pro subscription; x402/free-tier
+ * callers have no account to check Pro status against, so they always get
+ * the base limit.
+ */
 export async function checkRateLimit(
   env: Env,
   requesterId: string,
   domain: string,
+  isPro = false,
 ): Promise<{ limited: boolean; count: number }> {
   const windowBucket = Math.floor(Date.now() / 1000 / DOMAIN_WINDOW_SECONDS);
   const key = `rl:${requesterId}:${domain}:${windowBucket}`;
   const count = await incrementWindowCounter(env.RATELIMIT_KV, key, DOMAIN_WINDOW_SECONDS);
-  return { limited: count > DOMAIN_LIMIT, count };
+  const limit = isPro ? DOMAIN_LIMIT * 2 : DOMAIN_LIMIT;
+  return { limited: count > limit, count };
 }
 
 /** Per-requester limiter guarding the outbound facilitator /verify call. */

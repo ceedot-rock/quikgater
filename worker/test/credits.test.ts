@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount } from "../src/credits";
+import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount, isProActive, setProStatus } from "../src/credits";
 import type { Env } from "../src/env";
 
 describe("generateApiKey", () => {
@@ -67,5 +67,47 @@ describe("debitAccount", () => {
     await creditAccount(env as Env, "qg_debit_exact", 500);
     const result = await debitAccount(env as Env, "qg_debit_exact", 500);
     expect(result).toEqual({ success: true, newBalanceAtomic: 0 });
+  });
+});
+
+describe("isProActive", () => {
+  it("is false for a null account", () => {
+    expect(isProActive(null)).toBe(false);
+  });
+
+  it("is false for an account with no pro field at all", async () => {
+    const account = await createAccount(env as Env, "qg_never_pro");
+    expect(isProActive(account)).toBe(false);
+  });
+
+  it("is true only when pro.active is exactly true", async () => {
+    const active = await setProStatus(env as Env, "qg_pro_active", { active: true, subscriptionId: "sub_1" });
+    expect(isProActive(active)).toBe(true);
+
+    const inactive = await setProStatus(env as Env, "qg_pro_lapsed", { active: false, subscriptionId: "sub_2" });
+    expect(isProActive(inactive)).toBe(false);
+  });
+});
+
+describe("setProStatus", () => {
+  it("creates a new zero-balance account with Pro active if none existed yet", async () => {
+    const account = await setProStatus(env as Env, "qg_pro_new", { active: true, subscriptionId: "sub_new" });
+    expect(account).toMatchObject({ apiKey: "qg_pro_new", balanceAtomic: 0, pro: { active: true, subscriptionId: "sub_new" } });
+    expect(await getAccount(env as Env, "qg_pro_new")).toEqual(account);
+  });
+
+  it("preserves an existing balance when activating Pro on an existing account", async () => {
+    await creditAccount(env as Env, "qg_pro_with_balance", 5_000_000);
+    const account = await setProStatus(env as Env, "qg_pro_with_balance", { active: true, subscriptionId: "sub_bal" });
+    expect(account.balanceAtomic).toBe(5_000_000);
+    expect(account.pro).toMatchObject({ active: true, subscriptionId: "sub_bal" });
+  });
+
+  it("flips an active account to inactive on cancellation without touching its balance", async () => {
+    await setProStatus(env as Env, "qg_pro_cancel", { active: true, subscriptionId: "sub_c" });
+    await creditAccount(env as Env, "qg_pro_cancel", 1_000_000);
+    const account = await setProStatus(env as Env, "qg_pro_cancel", { active: false, subscriptionId: "sub_c" });
+    expect(account.pro?.active).toBe(false);
+    expect(account.balanceAtomic).toBe(1_000_000);
   });
 });

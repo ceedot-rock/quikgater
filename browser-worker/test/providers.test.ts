@@ -42,7 +42,7 @@ describe("browserbase.render", () => {
     global.fetch = fetchSpy as unknown as typeof fetch;
 
     const result = await browserbase.render("https://example.com");
-    expect(result).toEqual({ markdown: "# Hello", providerUsed: "browserbase", costActual: null });
+    expect(result).toEqual({ markdown: "# Hello", providerUsed: "browserbase", costActual: null, title: null });
   });
 
   it("throws on a non-ok response", async () => {
@@ -79,14 +79,23 @@ describe("steeldev.render", () => {
       expect((init?.headers as Record<string, string>)["steel-api-key"]).toBe("test-key");
       expect(JSON.parse(init?.body as string)).toEqual({ url: "https://example.com", format: ["markdown"] });
       return new Response(
-        JSON.stringify({ content: { markdown: "# Steel Content" }, links: [], metadata: { statusCode: 200 } }),
+        JSON.stringify({
+          content: { markdown: "# Steel Content" },
+          links: [],
+          metadata: { statusCode: 200, title: "Steel Page Title" },
+        }),
         { status: 200 },
       );
     });
     global.fetch = fetchSpy as unknown as typeof fetch;
 
     const result = await steeldev.render("https://example.com");
-    expect(result).toEqual({ markdown: "# Steel Content", providerUsed: "steeldev", costActual: null });
+    expect(result).toEqual({
+      markdown: "# Steel Content",
+      providerUsed: "steeldev",
+      costActual: null,
+      title: "Steel Page Title",
+    });
   });
 
   it("throws when content.markdown is missing", async () => {
@@ -96,6 +105,17 @@ describe("steeldev.render", () => {
     ) as unknown as typeof fetch;
 
     await expect(steeldev.render("https://example.com")).rejects.toThrow("no markdown content");
+  });
+
+  it("falls back to null title when metadata.title is absent", async () => {
+    process.env.STEEL_API_KEY = "test-key";
+    global.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ content: { markdown: "# Steel" }, links: [], metadata: {} }), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const result = await steeldev.render("https://example.com");
+    expect(result.title).toBeNull();
   });
 });
 
@@ -116,14 +136,36 @@ describe("firecrawl.scrape", () => {
       expect((init?.headers as Record<string, string>).authorization).toBe("Bearer test-key");
       expect(JSON.parse(init?.body as string)).toEqual({ url: "https://example.com", formats: ["markdown"] });
       return new Response(
-        JSON.stringify({ success: true, data: { markdown: "# Firecrawl Content" } }),
+        JSON.stringify({
+          success: true,
+          data: { markdown: "# Firecrawl Content", metadata: { title: "Firecrawl Page Title" } },
+        }),
         { status: 200 },
       );
     });
     global.fetch = fetchSpy as unknown as typeof fetch;
 
     const result = await firecrawl.scrape("https://example.com");
-    expect(result).toEqual({ markdown: "# Firecrawl Content", providerUsed: "firecrawl", costActual: null });
+    expect(result).toEqual({
+      markdown: "# Firecrawl Content",
+      providerUsed: "firecrawl",
+      costActual: null,
+      title: "Firecrawl Page Title",
+    });
+  });
+
+  it("takes the first non-empty title when metadata.title is an array", async () => {
+    process.env.FIRECRAWL_API_KEY = "test-key";
+    global.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ success: true, data: { markdown: "# X", metadata: { title: ["", "Real Title"] } } }),
+          { status: 200 },
+        ),
+    ) as unknown as typeof fetch;
+
+    const result = await firecrawl.scrape("https://example.com");
+    expect(result.title).toBe("Real Title");
   });
 
   it("throws when success is false", async () => {
@@ -155,7 +197,10 @@ describe("scraperapi.scrape", () => {
       expect(requestUrl.searchParams.get("url")).toBe("https://example.com");
       expect(requestUrl.searchParams.get("render")).toBe("true");
       expect(requestUrl.searchParams.get("ultra_premium")).toBe("true");
-      return new Response("<html><body><h1>Hi</h1><p>Real content.</p></body></html>", { status: 200 });
+      return new Response(
+        "<html><head><title>Real Page &amp; Title</title></head><body><h1>Hi</h1><p>Real content.</p></body></html>",
+        { status: 200 },
+      );
     });
     global.fetch = fetchSpy as unknown as typeof fetch;
 
@@ -164,6 +209,17 @@ describe("scraperapi.scrape", () => {
     expect(result.costActual).toBeNull();
     expect(result.markdown).toContain("# Hi");
     expect(result.markdown).toContain("Real content.");
+    expect(result.title).toBe("Real Page & Title");
+  });
+
+  it("returns a null title when the HTML has no <title> tag", async () => {
+    process.env.SCRAPERAPI_KEY = "test-key";
+    global.fetch = vi.fn(
+      async () => new Response("<html><body><p>No title here.</p></body></html>", { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const result = await scraperapi.scrape("https://example.com");
+    expect(result.title).toBeNull();
   });
 
   it("throws on a non-ok response", async () => {

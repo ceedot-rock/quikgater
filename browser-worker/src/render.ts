@@ -9,6 +9,7 @@ export interface RenderResponse {
   markdown: string;
   providerUsed: string;
   costActual: number | null;
+  title: string | null;
 }
 
 const TOTAL_TIMEOUT_MS = 15_000; // spec §4 Layer 2: "Timeout: 15s total"

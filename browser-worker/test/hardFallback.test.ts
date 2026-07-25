@@ -16,17 +16,22 @@ afterEach(() => {
 
 describe("hardFallback", () => {
   it("delegates to scraperapi and returns its result on success", async () => {
-    vi.mocked(scraperapi.scrape).mockResolvedValue({ markdown: "# Bypassed", provider: "scraperapi", costActual: null });
+    vi.mocked(scraperapi.scrape).mockResolvedValue({
+      markdown: "# Bypassed",
+      provider: "scraperapi",
+      costActual: null,
+      title: "Bypassed Page",
+    });
 
     const result = await hardFallback("https://example.com/turnstile-protected", "layer2_failed");
 
-    expect(result).toEqual({ markdown: "# Bypassed", provider: "scraperapi", costActual: null });
+    expect(result).toEqual({ markdown: "# Bypassed", provider: "scraperapi", costActual: null, title: "Bypassed Page" });
     expect(scraperapi.scrape).toHaveBeenCalledWith("https://example.com/turnstile-protected", expect.any(AbortSignal));
   });
 
   it("logs an audit entry with url, reason, provider, and cost on success", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    vi.mocked(scraperapi.scrape).mockResolvedValue({ markdown: "# Ok", provider: "scraperapi", costActual: null });
+    vi.mocked(scraperapi.scrape).mockResolvedValue({ markdown: "# Ok", provider: "scraperapi", costActual: null, title: null });
 
     await hardFallback("https://example.com/page", "RENDER_FAILED");
 
@@ -66,7 +71,7 @@ describe("hardFallback", () => {
   });
 
   it("allows a non-blocklisted domain through", async () => {
-    vi.mocked(scraperapi.scrape).mockResolvedValue({ markdown: "# Fine", provider: "scraperapi", costActual: null });
+    vi.mocked(scraperapi.scrape).mockResolvedValue({ markdown: "# Fine", provider: "scraperapi", costActual: null, title: null });
     await expect(hardFallback("https://some-docs-site.example/page", "layer2_failed")).resolves.toMatchObject({ markdown: "# Fine" });
   });
 

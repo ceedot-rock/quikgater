@@ -16,6 +16,24 @@ export interface ScraperApiResult {
   markdown: string;
   provider: "scraperapi";
   costActual: number | null;
+  title: string | null;
+}
+
+// ScraperAPI's plain scrape endpoint returns raw HTML (see below), so unlike
+// the other three providers this doesn't need a provider-reported metadata
+// field - the real <title> tag is right there in the response we already
+// have, before turndown strips it.
+function extractTitle(html: string): string | null {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!match) return null;
+  const decoded = match[1]
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+  return decoded.length > 0 ? decoded : null;
 }
 
 /**
@@ -53,5 +71,5 @@ export async function scrape(url: string, signal?: AbortSignal): Promise<Scraper
   // this to a real per-call dollar figure here would be a guess dressed
   // up as a number. costActual stays null, same honesty as the other
   // three providers (see browserbase.ts/steeldev.ts/firecrawl.ts).
-  return { markdown, provider: "scraperapi", costActual: null };
+  return { markdown, provider: "scraperapi", costActual: null, title: extractTitle(html) };
 }

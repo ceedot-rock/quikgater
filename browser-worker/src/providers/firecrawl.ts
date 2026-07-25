@@ -10,13 +10,22 @@ export interface RenderResult {
   // field (credit usage is tracked account-side, not per-response) -
   // null here is honest, not a placeholder for a real number.
   costActual: number | null;
+  title: string | null;
 }
 
 const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
 
 interface FirecrawlScrapeResponse {
   success: boolean;
-  data?: { markdown?: string };
+  // Confirmed against the current OpenAPI schema at
+  // docs.firecrawl.dev/api-reference/endpoint/scrape, not memory:
+  // `data.metadata.title` is real, but documented as `string | string[]`.
+  data?: { markdown?: string; metadata?: { title?: string | string[] } };
+}
+
+function firstNonEmptyTitle(title: string | string[] | undefined): string | null {
+  const candidate = Array.isArray(title) ? title.find((t) => t.trim().length > 0) : title;
+  return candidate?.trim() || null;
 }
 
 export async function scrape(url: string, signal?: AbortSignal): Promise<RenderResult> {
@@ -39,5 +48,10 @@ export async function scrape(url: string, signal?: AbortSignal): Promise<RenderR
     throw new Error("firecrawl scrape returned no markdown content");
   }
 
-  return { markdown: body.data.markdown, providerUsed: "firecrawl", costActual: null };
+  return {
+    markdown: body.data.markdown,
+    providerUsed: "firecrawl",
+    costActual: null,
+    title: firstNonEmptyTitle(body.data.metadata?.title),
+  };
 }

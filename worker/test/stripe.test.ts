@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createDepositCheckoutSession,
+  createProSubscriptionCheckoutSession,
   expireCheckoutSession,
   isValidDepositAmount,
   parseCheckoutCompletedEvent,
+  parseSubscriptionCheckoutCompletedEvent,
+  parseSubscriptionStatusEvent,
   verifyWebhookSignature,
 } from "../src/stripe";
 import type { Env } from "../src/env";
@@ -71,7 +74,7 @@ describe("parseCheckoutCompletedEvent", () => {
   it("extracts apiKey and amount from a real-shaped checkout.session.completed event", () => {
     const event = {
       type: "checkout.session.completed",
-      data: { object: { metadata: { apiKey: "qg_abc123" }, amount_total: 500 } },
+      data: { object: { mode: "payment", metadata: { apiKey: "qg_abc123" }, amount_total: 500 } },
     };
     expect(parseCheckoutCompletedEvent(event)).toEqual({ apiKey: "qg_abc123", amountTotalCents: 500 });
   });
@@ -82,12 +85,26 @@ describe("parseCheckoutCompletedEvent", () => {
   });
 
   it("returns null when metadata.apiKey is missing", () => {
-    const event = { type: "checkout.session.completed", data: { object: { metadata: {}, amount_total: 500 } } };
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "payment", metadata: {}, amount_total: 500 } },
+    };
     expect(parseCheckoutCompletedEvent(event)).toBeNull();
   });
 
   it("returns null when amount_total is missing", () => {
-    const event = { type: "checkout.session.completed", data: { object: { metadata: { apiKey: "qg_abc" } } } };
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "payment", metadata: { apiKey: "qg_abc" } } },
+    };
+    expect(parseCheckoutCompletedEvent(event)).toBeNull();
+  });
+
+  it("returns null for a subscription-mode session, even with matching fields - that's a Pro checkout, not a deposit", () => {
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "subscription", metadata: { apiKey: "qg_abc" }, amount_total: 2900 } },
+    };
     expect(parseCheckoutCompletedEvent(event)).toBeNull();
   });
 });
@@ -137,5 +154,94 @@ describe("expireCheckoutSession", () => {
     });
     await expireCheckoutSession(fakeEnv, "cs_test_123", fetchImpl as unknown as typeof fetch);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createProSubscriptionCheckoutSession", () => {
+  it("posts a real subscription-mode Checkout Session with metadata on both the session and the subscription", async () => {
+    const fakeEnv = { STRIPE_SECRET_KEY: "rk_test_fake" } as Env;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://api.stripe.com/v1/checkout/sessions");
+      const body = new URLSearchParams(init?.body as string);
+      expect(body.get("mode")).toBe("subscription");
+      expect(body.get("line_items[0][price_data][unit_amount]")).toBe("2900");
+      expect(body.get("line_items[0][price_data][recurring][interval]")).toBe("month");
+      expect(body.get("metadata[apiKey]")).toBe("qg_test");
+      expect(body.get("subscription_data[metadata][apiKey]")).toBe("qg_test");
+      return new Response(JSON.stringify({ id: "cs_sub_123", url: "https://checkout.stripe.com/cs_sub_123" }), { status: 200 });
+    });
+
+    const result = await createProSubscriptionCheckoutSession(
+      fakeEnv,
+      { apiKey: "qg_test", successUrl: "https://example.com/success", cancelUrl: "https://example.com/cancel" },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(result).toEqual({ id: "cs_sub_123", url: "https://checkout.stripe.com/cs_sub_123" });
+  });
+});
+
+describe("parseSubscriptionCheckoutCompletedEvent", () => {
+  it("extracts apiKey and subscriptionId from a real-shaped subscription checkout completion", () => {
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "subscription", metadata: { apiKey: "qg_abc" }, subscription: "sub_123" } },
+    };
+    expect(parseSubscriptionCheckoutCompletedEvent(event)).toEqual({ apiKey: "qg_abc", subscriptionId: "sub_123" });
+  });
+
+  it("returns null for a payment-mode session (that's a Rail B deposit, not Pro)", () => {
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "payment", metadata: { apiKey: "qg_abc" }, amount_total: 500 } },
+    };
+    expect(parseSubscriptionCheckoutCompletedEvent(event)).toBeNull();
+  });
+
+  it("returns null when subscription id is missing", () => {
+    const event = {
+      type: "checkout.session.completed",
+      data: { object: { mode: "subscription", metadata: { apiKey: "qg_abc" } } },
+    };
+    expect(parseSubscriptionCheckoutCompletedEvent(event)).toBeNull();
+  });
+});
+
+describe("parseSubscriptionStatusEvent", () => {
+  it("treats an active subscription.updated event as Pro-active", () => {
+    const event = {
+      type: "customer.subscription.updated",
+      data: { object: { id: "sub_123", status: "active", metadata: { apiKey: "qg_abc" } } },
+    };
+    expect(parseSubscriptionStatusEvent(event)).toEqual({ apiKey: "qg_abc", subscriptionId: "sub_123", active: true });
+  });
+
+  it("treats a past_due subscription.updated event as Pro-inactive", () => {
+    const event = {
+      type: "customer.subscription.updated",
+      data: { object: { id: "sub_123", status: "past_due", metadata: { apiKey: "qg_abc" } } },
+    };
+    expect(parseSubscriptionStatusEvent(event)).toEqual({ apiKey: "qg_abc", subscriptionId: "sub_123", active: false });
+  });
+
+  it("treats subscription.deleted as Pro-inactive regardless of the status field", () => {
+    const event = {
+      type: "customer.subscription.deleted",
+      data: { object: { id: "sub_123", status: "canceled", metadata: { apiKey: "qg_abc" } } },
+    };
+    expect(parseSubscriptionStatusEvent(event)).toEqual({ apiKey: "qg_abc", subscriptionId: "sub_123", active: false });
+  });
+
+  it("returns null for unrelated event types", () => {
+    const event = { type: "invoice.paid", data: { object: { id: "sub_123", status: "active" } } };
+    expect(parseSubscriptionStatusEvent(event)).toBeNull();
+  });
+
+  it("returns null when metadata.apiKey is missing", () => {
+    const event = {
+      type: "customer.subscription.updated",
+      data: { object: { id: "sub_123", status: "active", metadata: {} } },
+    };
+    expect(parseSubscriptionStatusEvent(event)).toBeNull();
   });
 });

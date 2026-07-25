@@ -19,14 +19,14 @@ vi.mock("../src/payment", async (importOriginal) => {
 });
 
 import { enqueueRenderJob, getJobStatus, processRenderJob } from "../src/queue";
-import { getCached } from "../src/cache";
+import { getCached, cacheKey, normalizeUrl } from "../src/cache";
 import { settlePayment } from "../src/payment";
 import type { PaymentPayload, PaymentRequirements } from "../src/payment";
 // credits.ts is real KV read/writes here, not mocked - unlike
 // settlePayment, it has no real network call to avoid, so there's no
 // reason to fake it; Miniflare simulates CREDITS_KV locally same as any
 // other KV binding.
-import { createAccount, getAccount } from "../src/credits";
+import { createAccount, getAccount, setProStatus } from "../src/credits";
 import type { Env } from "../src/env";
 import type { RenderJob, Billing } from "../src/queue";
 
@@ -163,6 +163,23 @@ describe("processRenderJob", () => {
     expect(cached?.metadata).toMatchObject({ title: "Hello", tierUsed: "L2-browserbase" });
   });
 
+  it("prefers a provider-reported title over the markdown-heading heuristic when /render supplies one", async () => {
+    const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
+    const j = job("process-render-real-title", "https://cache-real-title.example/docs/x");
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ markdown: "# Heading Text", providerUsed: "steeldev", title: "Real Steel Title" }),
+          { status: 200 },
+        ),
+    );
+
+    await processRenderJob(e, j, fetchImpl as unknown as typeof fetch);
+
+    const cached = await getCached(e, j.url);
+    expect(cached?.metadata).toMatchObject({ title: "Real Steel Title" });
+  });
+
   it("falls back to /hard-fallback when /render fails, marks done, settles, and caches under tier L3", async () => {
     const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
     const j = job("process-render-fallback-ok", "https://cache-populate-fallback.example/docs/y");
@@ -264,6 +281,27 @@ describe("processRenderJob", () => {
       const account = await getAccount(e, "qg_credits_fail");
       // 1,000,000 - 100 (FAILURE_PRICE_ATOMIC) = 999,900
       expect(account?.balanceAtomic).toBe(999_900);
+    });
+
+    it("applies the Pro 7-day cache-TTL floor when the paying account has an active subscription", async () => {
+      const e = testEnv({ BROWSER_WORKER_URL: "https://browser-worker.test" });
+      await setProStatus(e, "qg_credits_pro_ttl", { active: true, subscriptionId: "sub_queue_ttl" });
+      await e.CREDITS_KV.put(
+        "account:qg_credits_pro_ttl",
+        JSON.stringify({ apiKey: "qg_credits_pro_ttl", balanceAtomic: 1_000_000, createdAt: Date.now(), pro: { active: true, subscriptionId: "sub_queue_ttl", updatedAt: Date.now() } }),
+      );
+      // "news" URL shape - classifyTtl's own tier TTL for this is only 300s.
+      const url = "https://credits-pro-ttl.example/news/story";
+      const j = job("process-credits-pro-ttl", url, { kind: "credits", apiKey: "qg_credits_pro_ttl" });
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ markdown: "# News", providerUsed: "browserbase" }), { status: 200 }));
+
+      await processRenderJob(e, j, fetchImpl as unknown as typeof fetch);
+
+      const hash = await cacheKey(normalizeUrl(url), "markdown");
+      const list = await e.CACHE_KV.list({ prefix: `cache:${hash}` });
+      const entry = list.keys[0];
+      const secondsFromNow = (entry!.expiration as number) - Math.floor(Date.now() / 1000);
+      expect(secondsFromNow).toBeGreaterThan(24 * 60 * 60); // nowhere near news' 300s
     });
 
     it("marks the job unsettled (but still returns content) when the debit fails despite a successful render", async () => {

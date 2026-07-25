@@ -26,6 +26,31 @@ describe("checkRateLimit (per requester+domain, 100/min)", () => {
     expect(domainA.limited).toBe(true);
     expect(domainB.limited).toBe(false);
   });
+
+  it("doubles the ceiling to 200/min for a Pro caller (isPro=true)", async () => {
+    const requester = "rl-pro-requester";
+    const domain = "rl-pro-test.example";
+    for (let i = 0; i < 200; i++) {
+      const { limited } = await checkRateLimit(env, requester, domain, true);
+      expect(limited).toBe(false);
+    }
+    const { limited, count } = await checkRateLimit(env, requester, domain, true);
+    expect(limited).toBe(true);
+    expect(count).toBe(201);
+  });
+
+  it("shares the same counter bucket regardless of isPro - it only changes the ceiling, not the key", async () => {
+    const requester = "rl-pro-shared-bucket-requester";
+    const domain = "rl-pro-shared-bucket.example";
+    for (let i = 0; i < 100; i++) {
+      await checkRateLimit(env, requester, domain, false);
+    }
+    // Same (requester, domain, window) bucket is already at 100 - a Pro
+    // call keeps incrementing it, just against double the ceiling.
+    const proResult = await checkRateLimit(env, requester, domain, true);
+    expect(proResult.count).toBe(101);
+    expect(proResult.limited).toBe(false);
+  });
 });
 
 describe("checkPaymentVerifyRateLimit (per requester only, 300/min)", () => {
