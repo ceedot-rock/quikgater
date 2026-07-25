@@ -70,3 +70,27 @@ export async function checkPaymentVerifyRateLimit(
   const count = await incrementWindowCounter(env.RATELIMIT_KV, key, VERIFY_WINDOW_SECONDS);
   return { limited: count > VERIFY_LIMIT, count };
 }
+
+// Free tier ("100 free cache hits/day/IP", per the README's gap note): a
+// cache hit is cheap enough to serve without touching either payment rail
+// at all. Fixed-window like the limiters above, just a 24h window instead
+// of 60s, and keyed by IP only - see index.ts for why (Bearer-authenticated
+// callers already have a paid account and don't get a competing free
+// allowance, and the spec explicitly scopes this quota by IP, not by
+// requesterId's x-api-key-first fallback). Distinct "free:" prefix so it
+// can never collide with the rl:/rl-verify: keys above.
+const FREE_TIER_WINDOW_SECONDS = 24 * 60 * 60;
+export const FREE_TIER_DAILY_LIMIT = 100;
+
+/**
+ * Per-IP daily free-cache-hit quota. Only call this once a cache hit is
+ * already confirmed - it increments on every call, and the free tier is
+ * only ever meant to cover hits (a miss always falls through to a paid
+ * rail regardless of quota, per index.ts).
+ */
+export async function checkFreeTierQuota(env: Env, ip: string): Promise<{ limited: boolean; count: number }> {
+  const dayBucket = Math.floor(Date.now() / 1000 / FREE_TIER_WINDOW_SECONDS);
+  const key = `free:${ip}:${dayBucket}`;
+  const count = await incrementWindowCounter(env.RATELIMIT_KV, key, FREE_TIER_WINDOW_SECONDS);
+  return { limited: count > FREE_TIER_DAILY_LIMIT, count };
+}

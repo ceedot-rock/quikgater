@@ -610,6 +610,94 @@ describe("Layer 1 (cheap in-Worker fetch)", () => {
   });
 });
 
+describe("Free tier (100 free cache hits/day/IP)", () => {
+  it("serves a cache hit free, with no debit/settlement, while under quota", async () => {
+    const ip = "free-tier-under-quota-ip";
+    const url = "https://free-tier-hit.example/docs/guide";
+    await setCached(env, url, { title: "Free Guide", etag: null, tierUsed: "L2-browserbase", markdown: "# Free Guide" });
+
+    const res = await run(req(url, { ignore_robots: "true" }, { "cf-connecting-ip": ip }, { withPayment: false }));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      markdown: string;
+      cacheHit: boolean;
+      tierUsed: string;
+      payment: { method: string; freeTierRemaining: number };
+    };
+    expect(body).toMatchObject({ markdown: "# Free Guide", cacheHit: true, tierUsed: "L2-browserbase" });
+    expect(body.payment).toEqual({ method: "free", freeTierRemaining: 99 });
+    // No rail touched at all - neither settlement nor a facilitator verify call.
+    expect(settlePayment).not.toHaveBeenCalled();
+    expect(verifyPayment).not.toHaveBeenCalled();
+  });
+
+  it("falls through to normal x402 billing once the IP's daily quota is exhausted", async () => {
+    const ip = "free-tier-over-quota-ip";
+    const url = "https://free-tier-quota-exhausted.example/docs/guide";
+    await setCached(env, url, { title: "Guide", etag: null, tierUsed: "L2-browserbase", markdown: "# Guide" });
+
+    for (let i = 0; i < 100; i++) {
+      const res = await run(req(url, { ignore_robots: "true" }, { "cf-connecting-ip": ip }, { withPayment: false }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { payment: { method: string } };
+      expect(body.payment.method).toBe("free");
+    }
+
+    // 101st cache hit from the same IP on the same day: quota exhausted,
+    // falls through to Rail A (x402) exactly as if the free tier didn't
+    // exist - this time a real X-PAYMENT header is required and settled.
+    const res = await run(req(url, { ignore_robots: "true" }, { "cf-connecting-ip": ip }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { cacheHit: boolean; payment: { verified: boolean; settled: boolean } };
+    expect(body.cacheHit).toBe(true);
+    expect(body.payment).toEqual({
+      verified: true,
+      settled: true,
+      transaction: "0xMockTransactionHash",
+      payer: "0xTestPayer",
+    });
+    expect(settlePayment).toHaveBeenCalled();
+  });
+
+  it("a cache miss always falls through to normal billing, regardless of quota", async () => {
+    const ip = "free-tier-miss-ip";
+    const res = await run(
+      req("https://free-tier-never-cached.example/page", { ignore_robots: "true" }, { "cf-connecting-ip": ip }),
+    );
+    // Normal Rail A miss behavior (queued) - the free tier never even
+    // consulted the quota, since only a hit can be served free.
+    expect(res.status).toBe(202);
+    expect(enqueueRenderJob).toHaveBeenCalled();
+  });
+
+  it("does not apply to Bearer-authenticated requests, even for a fresh IP under quota", async () => {
+    const ip = "free-tier-bearer-ip";
+    const url = "https://free-tier-bearer-hit.example/docs/guide";
+    await setCached(env, url, { title: "Guide", etag: null, tierUsed: "L2-browserbase", markdown: "# Guide" });
+    await createAccount(env as Env, "qg_free_tier_bearer");
+    await env.CREDITS_KV.put(
+      "account:qg_free_tier_bearer",
+      JSON.stringify({ apiKey: "qg_free_tier_bearer", balanceAtomic: 1_000_000, createdAt: Date.now() }),
+    );
+
+    const res = await run(
+      req(
+        url,
+        { ignore_robots: "true" },
+        { "cf-connecting-ip": ip, authorization: "Bearer qg_free_tier_bearer" },
+        { withPayment: false },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { payment: { method: string; debitedAtomic: number } };
+    // Billed via credits (Rail B), not the free tier - a Bearer caller
+    // already has a paid account and shouldn't get a competing allowance.
+    expect(body.payment).toEqual({ method: "credits", debitedAtomic: 200, newBalanceAtomic: 999_800 });
+  });
+});
+
 async function hmacHex(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",

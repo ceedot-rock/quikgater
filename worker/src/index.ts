@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { isBlocklisted } from "./blocklist";
 import { getRobotsTxt, robotsAllows } from "./robots";
-import { checkPaymentVerifyRateLimit, checkRateLimit } from "./ratelimit";
+import { checkFreeTierQuota, checkPaymentVerifyRateLimit, checkRateLimit, FREE_TIER_DAILY_LIMIT } from "./ratelimit";
 import {
   buildPaymentRequirements,
   decodePaymentHeader,
@@ -206,6 +206,51 @@ export default {
     // an X-PAYMENT header uses credits; X-PAYMENT is simply never read. ---
     const authHeader = request.headers.get("authorization");
     const bearerApiKey = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : null;
+
+    // --- Free tier ("100 free cache hits/day/IP" - see README's gap note).
+    // Deliberately NOT for Bearer-authenticated requests: that caller
+    // already has a paid credits account, so a competing free allowance
+    // would just be a way to dodge Rail B. Scoped to the raw connecting
+    // IP, not requesterId (which prefers x-api-key) - the quota is
+    // IP-scoped by spec, independent of any API key. Only a cache HIT can
+    // be served free; a miss always falls through to a paid rail
+    // regardless of quota, since serving one requires real queue/Fly.io
+    // work this tier isn't meant to cover. No Step 1 (blocklist/robots/
+    // rate-limit) re-check here, deliberately: a cache entry only exists
+    // because the request that created it already passed those checks
+    // once, on a paid path, at write time. ---
+    if (!bearerApiKey) {
+      const freeTierIp = request.headers.get("cf-connecting-ip");
+      if (freeTierIp) {
+        const freeCached = await getCached(env, target);
+        if (freeCached) {
+          const quota = await checkFreeTierQuota(env, freeTierIp);
+          if (!quota.limited) {
+            logRequestCost({
+              url: target,
+              domain: targetUrl.hostname,
+              cache_hit: true,
+              layer: "L0",
+              cost_actual_usd: 0.00001,
+              charge_usd: 0,
+              latency_ms: Date.now() - requestStart,
+              status: "success",
+            });
+            return jsonResponse(
+              {
+                success: true,
+                markdown: freeCached.markdown,
+                title: freeCached.metadata.title,
+                cacheHit: true,
+                tierUsed: freeCached.metadata.tierUsed,
+                payment: { method: "free", freeTierRemaining: FREE_TIER_DAILY_LIMIT - quota.count },
+              },
+              200,
+            );
+          }
+        }
+      }
+    }
 
     if (bearerApiKey) {
       const account = await getAccount(env, bearerApiKey);

@@ -58,7 +58,7 @@ Deliberately attempted only *after* payment is verified and Step 1 has passed, n
 **Explicitly deferred (not core scope for this pass):**
 - **Auto-topup at <$1** (spec §5) - the deposit/checkout/webhook/debit mechanics above are what it would build on top of, but the "automatically charge a saved payment method" part isn't built.
 - **Quikgater Pro, $29/mo** (2x rate limit, 7-day cache TTL, email support, `ignore_robots` option) - a separate subscription product, not started.
-- **Free tier.** Spec's "100 free cache hits/day/IP" needs an account/IP-quota system that doesn't exist - a cache hit is cheap to serve (no queue, no Fly.io call) but still requires payment via one of the two rails, same as a miss.
+- **Free tier. Done, 2026-07-25.** `checkFreeTierQuota` in `worker/src/ratelimit.ts` (24h fixed-window KV counter, same `incrementWindowCounter` pattern as the existing rate limiters, distinct `free:<ip>:<dayBucket>` key prefix) + a new branch in `index.ts` right after `bearerApiKey` is resolved. For a non-Bearer request: a cache hit under the IP's 100/day quota is served directly - no debit, no settlement, neither rail touched at all (`payment: { method: "free", freeTierRemaining }`) - and the counter increments only on an actual served hit. A cache miss always falls through to a paid rail regardless of quota (there's real queue/Fly.io cost behind a miss, which this tier was never meant to cover), and an exhausted quota falls through to normal x402/credits billing exactly as before. Scoped to the raw `cf-connecting-ip` header, not `requesterId` (which prefers `x-api-key`) - the spec's quota is IP-scoped, and a Bearer-authenticated caller already has a paid account so doesn't get a second, competing free allowance. Deliberately skips a fresh Step 1 (blocklist/robots/rate-limit) check on the free path itself: a cache entry only exists because the request that created it already passed those checks once, at write time, on a paid path. 4 new tests in `worker/test/worker.test.ts` (under quota, over quota, miss, Bearer-unaffected); all 138 tests pass.
 
 **Step 6 caveats, stated plainly:**
 - **No `costActual` from any provider, confirmed on real calls, not just from reading docs.** The live test below returned `"costActual":null` from a real successful Browserbase call - checked each provider's response schema beforehand (Browserbase Fetch, Steel `/v1/scrape`, Firecrawl `/v2/scrape`) and none report a per-call dollar cost in the body, and the real response confirmed it. Spec §6's `cost_actual_usd` will stay `null` for L2 until/unless a provider exposes this (or costs get estimated from published pricing instead of measured per-call).
@@ -74,7 +74,7 @@ Deliberately attempted only *after* payment is verified and Step 1 has passed, n
 ## Running things
 
 ```bash
-cd worker && npm install && npm test              # 134 tests
+cd worker && npm install && npm test              # 138 tests
 cd worker && npx wrangler dev --local --port 8788  # live local server, real facilitator calls
 cd browser-worker && npm install && npm test       # 16 tests
 cd browser-worker && npm run dev                   # server on :8080, 502s without provider API keys
