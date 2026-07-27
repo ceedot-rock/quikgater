@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "api/*.ts", "use": "@vercel/node" }
+  ],
+  "routes": [
+    { "src": "/render", "dest": "/api/render.ts" },
+    { "src": "/hard-fallback", "dest": "/api/hard-fallback.ts" },
+    { "src": "/health", "dest": "/api/health.ts" }
+  ]
+}
