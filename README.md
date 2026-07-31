@@ -2,6 +2,17 @@
 
 Pay-per-fact web fetch for AI agents. Implementation of `fetchgate_v2_1_FINAL.md` (x402 Primitive Spec v2.1, still under its original filename — the spec doc wasn't renamed, only the product/repo), which is the source of truth for architecture/pricing/policy decisions - this README only tracks build status.
 
+**Static cost / price table:** [`docs/COST_TABLE.md`](docs/COST_TABLE.md) (Rail A x402 + Rail B credits; mirrors `worker/src/payment.ts`).
+
+## Related (portfolio)
+
+| Project | Role |
+|---------|------|
+| [CuNi](https://github.com/ceedot-rock/cuni) | Exact multi-target language · [Studio](https://cuni-studio.fly.dev/) |
+| [Agent-Rider](https://github.com/ceedot-rock/Agent-Rider) | Multi-agent coordination (consumers of paid fetch) |
+| [SlidPhi](https://github.com/ceedot-rock/SlidPhiLabs) | Integer codecs (`slid-phi`) |
+| [TEACHAiD](https://github.com/ceedot-rock/teachaid) | Interactive beginner school app |
+
 **Renamed from Fetchgate to Quikgater, 2026-07-24** — "Fetchgate" collided with an existing company (fetchgate.com, a Webflow file-gating product). GitHub repo, Cloudflare Worker, Queue, R2 bucket, and Fly.io app were all renamed/recreated; old resources were deleted. See the bottom of this file for the verification log from that migration.
 
 ## Layout
