@@ -1,5 +1,13 @@
 # Quikgater
 
+Pay-per-fact web fetch for AI agents, from [Slid Phi Labs](https://www.slidphilabs.com).
+
+Agents pay per fetch (x402 / USDC). This is **not** the compressor, **not** Chamber, and **not** CuNi. Lab catalog: [slidphilabs.com/products](https://www.slidphilabs.com/products). Product page: [slidphilabs.com/quikgater](https://www.slidphilabs.com/quikgater).
+
+The rest of this README is the build log for the worker.
+
+---
+
 Pay-per-fact web fetch for AI agents. Implementation of `fetchgate_v2_1_FINAL.md` (x402 Primitive Spec v2.1, still under its original filename — the spec doc wasn't renamed, only the product/repo), which is the source of truth for architecture/pricing/policy decisions - this README only tracks build status.
 
 **Static cost / price table:** [`docs/COST_TABLE.md`](docs/COST_TABLE.md) (Rail A x402 + Rail B credits; mirrors `worker/src/payment.ts`).
