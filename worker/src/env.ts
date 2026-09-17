@@ -24,4 +24,8 @@ export interface Env {
   // agentrider, agentmagnet) - do not assume exclusive use of it.
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  // SettleHop scaffold (worker/src/settleHop.ts): unset or "mock"/"dry-run"
+  // = mock charge only (default). Any other value refuses live debit closed.
+  // No live debit until Corey okays. PCC ≠ payment.
+  SETTLE_HOP_MODE?: string;
 }

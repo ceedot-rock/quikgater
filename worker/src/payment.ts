@@ -199,3 +199,18 @@ export async function settlePayment(
   }
   return res.json();
 }
+
+/**
+ * Dry-run SettleHop receipt — same shape as a successful settlePayment
+ * response, but NEVER hits the facilitator. Used by settleHop.ts mock
+ * path so Rider/Chamber can exercise admit without a live debit.
+ * PCC ≠ payment. No production charge until Corey okays.
+ */
+export function mockSettleHopReceipt(hopId: string): SettleResponse {
+  return {
+    success: true,
+    transaction: `mock:settlehop:${hopId}`,
+    network: NETWORK,
+    payer: "0xMockSettleHop",
+  };
+}
