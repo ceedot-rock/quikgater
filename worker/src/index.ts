@@ -1,4 +1,11 @@
 import type { Env } from "./env";
+import {
+  handleSettleHopCharge,
+  httpStatusForSettleHop,
+  parseSettleHopJson,
+  parseSettleHopText,
+  type SettleHopResult,
+} from "./settleHop";
 import { isBlocklisted } from "./blocklist";
 import { getRobotsTxt, robotsAllows } from "./robots";
 import { checkFreeTierQuota, checkPaymentVerifyRateLimit, checkRateLimit, FREE_TIER_DAILY_LIMIT } from "./ratelimit";
@@ -207,6 +214,47 @@ async function handleProCheckout(request: Request, env: Env): Promise<Response> 
   return jsonResponse({ success: true, apiKey, isNewAccount, checkoutUrl: session.url, sessionId: session.id }, 200);
 }
 
+
+/**
+ * POST /v1/settle-hop — Rider clerk SettleHop charge scaffold.
+ * Accepts CUNI SettleHop exact-text or thin JSON wrap of bound fields.
+ * Default mock/dry-run (SETTLE_HOP_MODE unset|mock|dry-run); never live-debits.
+ * Force mock fail with header X-SettleHop-Mock: fail (Chamber reject.funds path).
+ * PCC ≠ payment. Links quikgater #2.
+ */
+async function handleSettleHop(request: Request, env: Env): Promise<Response> {
+  const mockFail = (request.headers.get("x-settlehop-mock") ?? "").toLowerCase() === "fail";
+  const raw = await request.text();
+  const ct = (request.headers.get("content-type") ?? "").toLowerCase();
+
+  let parsed: ReturnType<typeof parseSettleHopText>;
+  if (ct.includes("application/json")) {
+    let body: unknown;
+    try {
+      body = raw ? JSON.parse(raw) : null;
+    } catch {
+      const bad: SettleHopResult = { ok: false, code: "reject.kind", mode: "mock", note: "Malformed JSON body." };
+      return jsonResponse(bad, httpStatusForSettleHop(bad));
+    }
+    parsed = parseSettleHopJson(body);
+  } else {
+    parsed = parseSettleHopText(raw);
+  }
+
+  if (!parsed.ok) {
+    const fail: SettleHopResult = {
+      ok: false,
+      code: parsed.code,
+      mode: "mock",
+      note: "SettleHop parse rejected (fail-closed). No charge attempted. PCC ≠ payment.",
+    };
+    return jsonResponse(fail, httpStatusForSettleHop(fail));
+  }
+
+  const result = handleSettleHopCharge(parsed.hop, env, { mockFail });
+  return jsonResponse(result, httpStatusForSettleHop(result));
+}
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const requestStart = Date.now();
@@ -226,6 +274,13 @@ export default {
         return jsonResponse({ success: false, error: "JOB_NOT_FOUND" }, 404);
       }
       return jsonResponse({ success: true, jobId, ...status }, 200);
+    }
+
+    // SettleHop charge scaffold (quikgater #2) — mock/dry-run by default.
+    // Does not invent a second payment protocol; reuses payment.ts x402 rails
+    // without live settle. PCC ≠ payment.
+    if (url.pathname === "/v1/settle-hop" && request.method === "POST") {
+      return handleSettleHop(request, env);
     }
 
     // Public cost table (no auth) — agent/ops discovery of x402 + credit prices.
