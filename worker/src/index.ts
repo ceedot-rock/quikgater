@@ -22,6 +22,7 @@ import {
 import { enqueueRenderJob, getJobStatus, processRenderJob, type RenderJob } from "./queue";
 import { getCached, setCached, PRO_CACHE_TTL_SECONDS } from "./cache";
 import { logRequestCost } from "./costlog";
+import pkgJson from "../package.json";
 import { buildPublicCostsBody } from "./publicCosts";
 import { tryLayer1Fetch } from "./layer1";
 import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount, isProActive, setProStatus } from "./credits";
@@ -40,6 +41,34 @@ function jsonResponse(body: unknown, status: number): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+/**
+ * GET /service/about/endpoints — public service discovery for agents.
+ * Lets an agent enumerate this API's endpoints without reading the repo.
+ * Version is read from worker/package.json so it cannot drift from the
+ * declared version.
+ */
+function buildServiceAboutBody(): Record<string, unknown> {
+  return {
+    service: "quikgater-worker",
+    version: pkgJson.version,
+    repo: "https://github.com/ceedot-rock/quikgater",
+    endpoints: [
+      { method: "GET", path: "/service/about/endpoints", auth: "none", note: "this document" },
+      { method: "GET", path: "/v1/costs", auth: "none", note: "public price table (Rail A x402 + Rail B credits)" },
+      { method: "GET", path: "/?url=<target>", auth: "x402 payment or credits", note: "paid fetch" },
+      { method: "GET", path: "/v1/job/{id}", auth: "job id", note: "async render job status" },
+      { method: "POST", path: "/v1/settle-hop", auth: "none", note: "SettleHop charge scaffold; mock dry-run by default" },
+      { method: "POST", path: "/v1/credits/checkout", auth: "bearer api key", note: "Rail B deposit checkout session" },
+      { method: "GET", path: "/v1/credits/success", auth: "none", note: "Stripe checkout return" },
+      { method: "GET", path: "/v1/credits/cancel", auth: "none", note: "Stripe checkout cancel" },
+      { method: "GET", path: "/v1/credits/balance", auth: "bearer api key", note: "credit balance (atomic + USD)" },
+      { method: "POST", path: "/v1/pro/checkout", auth: "bearer api key", note: "Pro subscription checkout session" },
+      { method: "GET", path: "/v1/pro/status", auth: "bearer api key", note: "Pro subscription status" },
+      { method: "POST", path: "/v1/stripe/webhook", auth: "stripe signature", note: "Stripe event ingestion" },
+    ],
+  };
 }
 
 const JOB_STATUS_PATH_PREFIX = "/v1/job/";
@@ -286,6 +315,11 @@ export default {
     // Public cost table (no auth) — agent/ops discovery of x402 + credit prices.
     if (url.pathname === "/v1/costs" && request.method === "GET") {
       return jsonResponse(buildPublicCostsBody(), 200);
+    }
+
+    // Service discovery (no auth) — machine-readable endpoint list for agents.
+    if (url.pathname === "/service/about/endpoints" && request.method === "GET") {
+      return jsonResponse(buildServiceAboutBody(), 200);
     }
 
     // Rail B account/billing management routes - not `?url=` fetch
