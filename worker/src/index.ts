@@ -23,6 +23,7 @@ import { enqueueRenderJob, getJobStatus, processRenderJob, type RenderJob } from
 import { getCached, setCached, PRO_CACHE_TTL_SECONDS } from "./cache";
 import { logRequestCost } from "./costlog";
 import { buildPublicCostsBody } from "./publicCosts";
+import { buildDiscoveryBody } from "./discovery";
 import { tryLayer1Fetch } from "./layer1";
 import { createAccount, creditAccount, debitAccount, generateApiKey, getAccount, isProActive, setProStatus } from "./credits";
 import {
@@ -259,6 +260,15 @@ export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const requestStart = Date.now();
     const url = new URL(request.url);
+
+    // Informational routes must never access storage, fetch targets, or bill.
+    // An explicit ?url= (even empty) keeps the existing fetch validation path.
+    if (request.method === "GET" && url.pathname === "/" && !url.searchParams.has("url")) {
+      return jsonResponse(buildDiscoveryBody(), 200);
+    }
+    if (request.method === "GET" && url.pathname === "/health") {
+      return jsonResponse({ success: true, service: "quikgater-worker", status: "ok", check: "liveness-only" }, 200);
+    }
 
     // Job status polling (spec §8 Step 4: "GET /v1/job/{id}"). Handled
     // before anything else - it's a status lookup for a job that was
