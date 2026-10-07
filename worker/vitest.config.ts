@@ -1,21 +1,20 @@
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { defineConfig } from "vitest/config";
 
-export default defineWorkersConfig({
-  test: {
-    // Storage-heavy rate-limit tests should not compete across workerd instances.
-    poolOptions: {
-      workers: {
-        singleWorker: true,
-        wrangler: { configPath: "./wrangler.toml" },
-        // Test-only fixtures. A clean checkout must not need .dev.vars or
-        // production secrets; all Stripe/facilitator calls are mocked.
-        miniflare: {
-          bindings: {
-            STRIPE_SECRET_KEY: "sk_test_quikgater_fixture",
-            STRIPE_WEBHOOK_SECRET: "whsec_fake_for_local_dev_only",
-          },
+export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: { configPath: "./wrangler.toml" },
+      miniflare: {
+        bindings: {
+          STRIPE_SECRET_KEY: "sk_test_quikgater_fixture",
+          STRIPE_WEBHOOK_SECRET: "whsec_fake_for_local_dev_only",
         },
       },
-    },
+    }),
+  ],
+  test: {
+    maxWorkers: 1,
+    setupFiles: ["./test/setup.ts"],
   },
 });
