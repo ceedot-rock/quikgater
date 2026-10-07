@@ -1,6 +1,10 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
+// singleWorker shares a module cache across files. Re-evaluate queue.ts
+// against this file's payment mock, not worker.test.ts's earlier instance.
+vi.hoisted(() => vi.resetModules());
+
 // settlePayment is mocked here too - processRenderJob calls it for real
 // otherwise, which would hit the actual facilitator with a fake fixture
 // signature. verifyPayment/buildPaymentRequirements etc. stay real since

@@ -4,7 +4,18 @@ Pay-per-fact web fetch for AI agents, from [Slid Phi Labs](https://www.slidphila
 
 Agents pay per fetch (x402 / USDC). This is **not** the compressor, **not** Chamber, and **not** CuNi. Lab catalog: [slidphilabs.com/products](https://www.slidphilabs.com/products). Product page: [slidphilabs.com/quikgater](https://www.slidphilabs.com/quikgater).
 
-The rest of this README is the build log for the worker.
+## Start here
+
+Read the [developer quickstart](docs/QUICKSTART.md) for the fetch API, payment
+boundaries, async polling, and clean-checkout tests. `GET /` now describes the
+Worker API and `GET /health` reports liveness in this source revision; those
+additions require deployment before they appear on a hosted instance.
+
+The rest of this README is a historical build log, not a current deployment
+inventory. Statements such as "not built", "live", test counts, and fixture
+addresses describe the dated step where they appear and may be superseded.
+The full Cloudflare fetch Worker and the limited [Fly edge](fly-edge/README.md)
+are different services. Do not send paid fetches to the Fly dry-run edge.
 
 ---
 
