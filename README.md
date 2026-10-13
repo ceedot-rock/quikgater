@@ -1,5 +1,7 @@
 # Quikgater
 
+[![Audited checks](https://github.com/ceedot-rock/quikgater/actions/workflows/audited-checks.yml/badge.svg)](https://github.com/ceedot-rock/quikgater/actions/workflows/audited-checks.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Pay-per-fact web fetch for AI agents, from [Slid Phi Labs](https://www.slidphilabs.com).
 
 Agents pay per fetch (x402 / USDC). This is **not** the compressor, **not** Chamber, and **not** CuNi. Lab catalog: [slidphilabs.com/products](https://www.slidphilabs.com/products). Product page: [slidphilabs.com/quikgater](https://www.slidphilabs.com/quikgater).

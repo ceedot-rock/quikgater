@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ceedot-rock/quikgater/security/advisories/new
+    about: Report privately. Do not open a public issue.
+  - name: Licensing / partnership
+    url: mailto:corey@slidphilabs.com
+    about: Questions about using Quikgater in a product or partnering with Slid Phi Labs.
