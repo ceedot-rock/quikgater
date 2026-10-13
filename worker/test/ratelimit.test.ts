@@ -1,6 +1,13 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkPaymentVerifyRateLimit, checkRateLimit } from "../src/ratelimit";
+
+beforeEach(() => {
+  // Freeze only Date.now, not timers or KV I/O. A slow runner crossing a
+  // minute boundary must not silently create a new rate-limit bucket.
+  vi.spyOn(Date, "now").mockReturnValue(Date.now());
+});
+afterEach(() => vi.restoreAllMocks());
 
 describe("checkRateLimit (per requester+domain, 100/min)", () => {
   it("allows up to the limit and blocks the next one", async () => {
@@ -54,6 +61,14 @@ describe("checkRateLimit (per requester+domain, 100/min)", () => {
 });
 
 describe("checkPaymentVerifyRateLimit (per requester only, 300/min)", () => {
+  it("starts a fresh bucket after the minute changes", async () => {
+    vi.mocked(Date.now).mockReturnValue(1_800_000_000_000);
+    expect((await checkPaymentVerifyRateLimit(env, "window-boundary")).count).toBe(1);
+    expect((await checkPaymentVerifyRateLimit(env, "window-boundary")).count).toBe(2);
+    vi.mocked(Date.now).mockReturnValue(1_800_000_060_000);
+    expect((await checkPaymentVerifyRateLimit(env, "window-boundary")).count).toBe(1);
+  });
+
   it("allows up to the limit and blocks the next one", async () => {
     const requester = "rl-verify-test-requester";
     for (let i = 0; i < 300; i++) {

@@ -1,6 +1,8 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+
+vi.hoisted(() => vi.resetModules());
 
 // verifyPayment talks to the real x402.org testnet facilitator, which
 // needs a genuinely signed EIP-712 authorization to return isValid:true -
@@ -152,6 +154,7 @@ async function run(request: Request, testEnv: typeof env = env) {
 }
 
 beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now());
   vi.mocked(verifyPayment).mockClear();
   vi.mocked(verifyPayment).mockResolvedValue({ isValid: true, payer: "0xTestPayer" });
   vi.mocked(settlePayment).mockClear();
@@ -166,6 +169,40 @@ beforeEach(() => {
   vi.mocked(processRenderJob).mockResolvedValue(undefined);
   vi.mocked(tryLayer1Fetch).mockClear();
   vi.mocked(tryLayer1Fetch).mockResolvedValue(null);
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("Public API entry points", () => {
+  it("returns discovery without storage, secrets, or outbound calls", async () => {
+    const outbound = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected outbound request"));
+    const res = await run(new Request("https://worker.example/"), {} as Env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { service: string; payment: { x402: { network: string } } };
+    expect(body.service).toBe("quikgater-worker");
+    expect(body.payment.x402.network).toBe("base-sepolia");
+    expect(outbound).not.toHaveBeenCalled();
+    expect(verifyPayment).not.toHaveBeenCalled();
+    expect(settlePayment).not.toHaveBeenCalled();
+    expect(enqueueRenderJob).not.toHaveBeenCalled();
+  });
+
+  it("returns liveness without claiming downstream readiness", async () => {
+    const res = await run(new Request("https://worker.example/health"), {} as Env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ check: "liveness-only", status: "ok" });
+  });
+
+  it("keeps an explicit empty target invalid", async () => {
+    const res = await run(new Request("https://worker.example/?url="));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "MISSING_URL_PARAM" });
+  });
+
+  it("does not turn unknown paths or POST into discovery", async () => {
+    expect((await run(new Request("https://worker.example/unknown"))).status).toBe(400);
+    expect((await run(new Request("https://worker.example/", { method: "POST" }))).status).toBe(400);
+  });
 });
 
 describe("Payment gate (x402)", () => {
@@ -273,8 +310,8 @@ describe("Payment gate (x402)", () => {
 });
 
 describe("Step 1: edge safety shield", () => {
-  it("returns 400 when the url param is missing", async () => {
-    const res = await run(new Request("https://worker.example/", { headers: { "x-payment": fakePaymentHeader() } }));
+  it("returns 400 when an explicit url param is empty, even with a payment header", async () => {
+    const res = await run(new Request("https://worker.example/?url=", { headers: { "x-payment": fakePaymentHeader() } }));
     expect(res.status).toBe(400);
   });
 
