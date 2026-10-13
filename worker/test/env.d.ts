@@ -1,6 +1,7 @@
-import type { Env } from "../src/env";
+import type { Env as WorkerEnv } from "../src/env";
 
-declare module "cloudflare:test" {
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-  interface ProvidedEnv extends Env {}
+declare global {
+  namespace Cloudflare {
+    interface Env extends WorkerEnv {}
+  }
 }
