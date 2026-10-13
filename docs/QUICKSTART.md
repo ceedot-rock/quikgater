@@ -68,7 +68,7 @@ payment credentials. No example here signs a payment or authorizes a purchase.
 
 ## Run the local checks
 
-Requires Node 20 and npm. From a clean checkout:
+Requires Node 22 and npm. From a clean checkout:
 
 ```bash
 (cd worker && npm ci && npm run typecheck && npm test)
