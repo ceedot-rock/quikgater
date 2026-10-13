@@ -19,8 +19,7 @@
     "@types/turndown": "^5.0.6",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "~4.1.11",
-    "license": "MIT"
+    "vitest": "~4.1.11"
   },
   "license": "MIT"
 }

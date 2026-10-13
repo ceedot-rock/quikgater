@@ -17,7 +17,9 @@
     "vitest": "~4.1.11",
     "wrangler": "4.115.0"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "overrides": {
     "miniflare": {
       "sharp": "0.35.5",
